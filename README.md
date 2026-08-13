@@ -139,8 +139,13 @@ which is why the tests can drive a mock agent without a network.
 
 ## Tests
 
-19 test files covering the protocol codec, discovery, connection lifecycle,
-persistence and message delivery.
+323 tests across 19 files — the protocol codec, discovery, connection lifecycle,
+persistence and message delivery. All of them pass on an iOS 17.5 simulator
+under Xcode 15.4, and on iOS 26 in CI.
+
+Two runtimes is deliberate. A relationship bug once made every message vanish on
+iOS 17 while CI, which ran one runtime, stayed green — see
+`.github/workflows/ios-persistence-matrix.yml`.
 
 ```bash
 xcodebuild test \
