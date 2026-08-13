@@ -1318,7 +1318,9 @@ final class NetworkRecoveryTests: XCTestCase {
         let transport = MockAgentTransport()
         let monitor = MockNetworkMonitor()
         var viewModel: ChatViewModel? = ChatViewModel(store: store, client: transport, networkMonitor: monitor)
-        weak let releasedViewModel = viewModel
+        // `weak var`, not `weak let`: Swift 6 accepts the latter, Swift 5 rejects it
+        // outright, and the reference is never reassigned either way.
+        weak var releasedViewModel = viewModel
         setUpAgentAndConversation(viewModel!)
         transport.approvalRequests = [approvalRequest(tool: "write")]
 
