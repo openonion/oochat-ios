@@ -95,7 +95,7 @@ iOS 17 users and anyone with Reduce Transparency enabled see anyway.
 
 | # | What | Where |
 |---|---|---|
-| 1 | Bundle identifier | `OOChatIOS.xcodeproj/project.pbxproj` — currently `ai.openonion.oochat` |
+| 1 | Bundle identifier | `OOChatIOS.xcodeproj/project.pbxproj` — currently `ai.openonion.app` |
 | 2 | Display name | `OOChatIOS/Resources/Info.plist` |
 | 3 | Icon and accent | `OOChatIOS/Resources/Assets.xcassets` |
 | 4 | Brand colour | `OOChatIOS/Shared/AppTheme.swift` |

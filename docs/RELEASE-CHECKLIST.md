@@ -7,7 +7,7 @@ State of play and what is left. Written 2026-08-13, updated the same evening.
 | | |
 |---|---|
 | Product name | **OpenOnion**. Checked the US, GB and AU stores for an exact match — none. `openonion` is also unclaimed on PyPI and npm. |
-| Bundle identifier | `ai.openonion.oochat`, matching the sibling clients |
+| Bundle identifier | `ai.openonion.app`, matching the sibling clients |
 | Version | `1.0.0`, build `1` |
 | Accent colour | ConnectOnion green (`#16A34A` light / `#4ADE80` dark), one ramp shared with the web client |
 | Builds | Xcode 15.4 and Xcode 26 both build it. Five sites compiled only against the newest toolchain and are now guarded — see [Toolchains](../README.md#toolchains) |

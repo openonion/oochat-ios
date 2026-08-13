@@ -1,0 +1,136 @@
+name: Release
+
+# Push a tag like v1.0.1 and this archives the app. If the signing secrets are
+# present it also exports a signed .ipa and uploads it to TestFlight; if they
+# are not, it stops after the unsigned archive and says so.
+#
+# The skip is deliberate. A workflow that assumes credentials it does not have
+# turns every tag red, and a job that is always red stops being read.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PROJECT: OOChatIOS.xcodeproj
+  SCHEME: OOChatIOS
+
+jobs:
+  release:
+    name: Archive and upload
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve packages
+        run: xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project "$PROJECT" -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/OpenOnion.xcarchive \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Check for signing secrets
+        id: secrets
+        env:
+          CERT: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+          KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Signing secrets are not set — publishing the unsigned archive only. Add APPLE_DISTRIBUTION_P12, APPLE_DISTRIBUTION_P12_PASSWORD, APPLE_PROVISIONING_PROFILE, APP_STORE_CONNECT_API_KEY, APP_STORE_CONNECT_KEY_ID and APP_STORE_CONNECT_ISSUER_ID to enable TestFlight upload."
+          fi
+
+      - name: Import certificate and profile
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_P12_PASSWORD }}
+          PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          # A throwaway keychain, so nothing is left behind on the runner and no
+          # step can reach the login keychain.
+          keychain=build/signing.keychain-db
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+
+          echo "$CERT" | base64 --decode > build/cert.p12
+          security import build/cert.p12 -k "$keychain" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm build/cert.p12
+
+          profiles=~/Library/MobileDevice/Provisioning\ Profiles
+          mkdir -p "$profiles"
+          echo "$PROFILE" | base64 --decode > "$profiles/release.mobileprovision"
+
+      - name: Export signed IPA
+        if: steps.secrets.outputs.present == 'true'
+        run: |
+          cat > build/ExportOptions.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>export</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>APPLE_TEAM_ID</string>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath build/OpenOnion.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist build/ExportOptions.plist
+
+      - name: Upload to TestFlight
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$KEY" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
+          ipa=$(find build/export -name '*.ipa' | head -1)
+          [ -n "$ipa" ] || { echo "::error::No .ipa was exported"; exit 1; }
+          xcrun altool --upload-app -f "$ipa" -t ios \
+            --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
+
+      - name: Package the archive
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          suffix=$([ "${{ steps.secrets.outputs.present }}" = "true" ] && echo "" || echo "-unsigned")
+          cd build && zip -qry "openonion-ios-$v$suffix-xcarchive.zip" OpenOnion.xcarchive
+          shasum -a 256 "openonion-ios-$v$suffix-xcarchive.zip" > "openonion-ios-$v$suffix-xcarchive.zip.sha256"
+
+      - name: Publish the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/*.zip
+            build/*.sha256
+          body: |
+            Signed and uploaded to TestFlight: **${{ steps.secrets.outputs.present }}**
+
+            When that says false, the attached archive is unsigned and cannot be
+            installed on a device — the signing secrets were not configured.
