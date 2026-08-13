@@ -1,0 +1,80 @@
+name: Deployment-target floor
+
+# Finds the oldest iOS version this app actually works on, rather than the
+# oldest it claims to support.
+#
+# Why this exists: the project deploys to iOS 17.0, and on an iOS 17.5 simulator
+# 22 of the SwiftData persistence tests fail — messages, delivery state and
+# attachments are written and read back empty, and the store does not survive a
+# relaunch. The same tests pass on iOS 26 in the normal CI job. The models use
+# `@Relationship(deleteRule: .cascade, inverse:)` to-many relationships, which
+# iOS 17's SwiftData does not honour reliably.
+#
+# Shipping with a floor of 17.0 would put the app on devices where every
+# conversation silently fails to persist. This job exists to establish where the
+# real floor is, so the deployment target can be raised to it.
+#
+# Manual only, and allowed to fail: it is an investigation, not a gate.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  floor:
+    name: Tests on iOS ${{ matrix.ios }}
+    runs-on: macos-26
+    timeout-minutes: 40
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        ios: ['18.0', '18.5', '26.0']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: List available runtimes
+        run: xcrun simctl list runtimes available
+
+      - name: Resolve a device on iOS ${{ matrix.ios }}
+        id: sim
+        run: |
+          # Resolve by runtime rather than by device name: runner images change
+          # their device line-up between releases, and a hardcoded name is the
+          # first thing to break when they do.
+          udid=$(xcrun simctl list devices available --json \
+            | python3 -c "
+import json,sys
+want='${{ matrix.ios }}'.replace('.','-')
+d=json.load(sys.stdin)['devices']
+for runtime,devices in d.items():
+    if runtime.endswith('iOS-'+want) and devices:
+        print(devices[0]['udid']); break
+")
+          if [ -z "$udid" ]; then
+            echo "::warning::No simulator for iOS ${{ matrix.ios }} on this runner"
+            exit 78
+          fi
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Run the persistence tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project OOChatIOS.xcodeproj \
+            -scheme OOChatIOS \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -parallel-testing-enabled NO \
+            -only-testing:OOChatIOSTests/SwiftDataConversationRepositoryTests \
+            -resultBundlePath "build/floor-${{ matrix.ios }}.xcresult"
+
+      - name: Upload result bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: floor-${{ matrix.ios }}
+          path: build/floor-${{ matrix.ios }}.xcresult
