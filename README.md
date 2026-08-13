@@ -1,4 +1,4 @@
-# oochat for iOS
+# OpenOnion for iOS
 
 [![Build & Test](https://github.com/openonion/oochat-ios/actions/workflows/ios-ci.yml/badge.svg)](https://github.com/openonion/oochat-ios/actions/workflows/ios-ci.yml)
 [![Pre-publication audit](https://github.com/openonion/oochat-ios/actions/workflows/audit.yml/badge.svg)](https://github.com/openonion/oochat-ios/actions/workflows/audit.yml)
@@ -6,6 +6,10 @@
 Native SwiftUI client for [ConnectOnion](https://docs.connectonion.com/) agents.
 Add an agent by its `0x…` address and talk to it from your phone — the same
 protocol the [web client](https://github.com/openonion/oo-chat) speaks.
+
+Ships as **OpenOnion** on the App Store. The repository and bundle identifier
+keep the `oochat` name they share with the other native clients; that name is
+for developers, not for the home screen.
 
 ## Who this is for
 
