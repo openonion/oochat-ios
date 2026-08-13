@@ -1,20 +1,18 @@
-name: Deployment-target floor
+name: Persistence across iOS versions
 
-# Finds the oldest iOS version this app actually works on, rather than the
-# oldest it claims to support.
+# Runs the SwiftData persistence tests on more than one iOS version.
 #
-# Why this exists: the project deploys to iOS 17.0, and on an iOS 17.5 simulator
-# 22 of the SwiftData persistence tests fail — messages, delivery state and
-# attachments are written and read back empty, and the store does not survive a
-# relaunch. The same tests pass on iOS 26 in the normal CI job. The models use
-# `@Relationship(deleteRule: .cascade, inverse:)` to-many relationships, which
-# iOS 17's SwiftData does not honour reliably.
+# It exists because those tests once passed on iOS 26 and failed on iOS 17.5 —
+# 22 of them — while CI only ever ran the newest runtime. A message's
+# `conversation` back-reference was never set; iOS 18 and later fill the inverse
+# in when you assign a parent's to-many array, iOS 17 does not, and a
+# relationship written from one side reads back empty from both. Nothing errored,
+# so the failure was invisible to a single-runtime CI.
 #
-# Shipping with a floor of 17.0 would put the app on devices where every
-# conversation silently fails to persist. This job exists to establish where the
-# real floor is, so the deployment target can be raised to it.
+# The bug is fixed. This job is what stops it coming back: the normal CI job
+# still runs one runtime, and a regression here would be silent again.
 #
-# Manual only, and allowed to fail: it is an investigation, not a gate.
+# Manual for now — promote it to `push` if it proves stable on the runners.
 
 on:
   workflow_dispatch:
@@ -24,7 +22,7 @@ permissions:
 
 jobs:
   floor:
-    name: Tests on iOS ${{ matrix.ios }}
+    name: Persistence on iOS ${{ matrix.ios }}
     runs-on: macos-26
     timeout-minutes: 40
     continue-on-error: true

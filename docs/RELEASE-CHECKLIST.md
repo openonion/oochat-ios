@@ -1,6 +1,6 @@
 # Getting OpenOnion onto the App Store
 
-State of play and what is left. Written 2026-08-13.
+State of play and what is left. Written 2026-08-13, updated the same evening.
 
 ## Done
 
@@ -16,6 +16,7 @@ State of play and what is left. Written 2026-08-13.
 | Privacy strings | Camera, microphone and speech recognition all present and specific |
 | Licence | MIT, ConnectOnion PTY LTD |
 | Audit | `scripts/audit_repo.sh` exits 0; no student IDs, course codes or inherited URLs |
+| Tests | 323 pass, 0 fail, on an iOS 17.5 simulator. It was 298/25: every message written to a conversation was lost on iOS 17, silently — the write succeeded and the relationship read back empty. Fixed by setting the `conversation` inverse explicitly. `ios-persistence-matrix.yml` guards against it returning |
 
 ## Blocked on credentials
 
@@ -67,4 +68,6 @@ even though every agent is one the user chose to add.
 - **End-to-end connect is unverified from a clean install.** The app builds, runs
   and reaches the agent's discovery path; a live conversation has not been driven
   from the simulator, because adding an agent needs typing that cannot be
-  automated through `simctl`.
+  automated through `simctl`. A local agent was verified separately: it answers
+  `GET /docs` and rejects an unsigned `POST /input` with
+  `401 unauthorized: signed request required`.

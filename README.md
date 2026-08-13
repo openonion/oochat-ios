@@ -43,15 +43,6 @@ is not enough.
 
 ### What it does not do
 
-- 🔴 **Do not ship this to iOS 17 yet.** The project deploys to iOS 17.0, but on
-  an iOS 17.5 simulator 22 of the SwiftData persistence tests fail: messages,
-  delivery state and attachments write and read back empty, and the store does
-  not survive a relaunch. The same tests pass on iOS 26. The models use
-  `@Relationship(deleteRule: .cascade, inverse:)` to-many relationships, which
-  iOS 17's SwiftData does not honour reliably — so a user on iOS 17 would lose
-  every conversation. `.github/workflows/ios-floor.yml` runs the persistence
-  tests across runtimes to find the real floor; raise
-  `IPHONEOS_DEPLOYMENT_TARGET` to it before release.
 - **No iPad-specific layout.** It runs on iPad, but the layout is the phone one
 - **Not on the App Store.** This is source you build and ship yourself; see
   [Shipping it](#shipping-it)
@@ -63,7 +54,7 @@ is not enough.
 
 | | |
 |---|---|
-| iOS | 17.0 is the declared target, but see the warning under [What it does not do](#what-it-does-not-do) — persistence is broken there |
+| iOS | 17.0 or later |
 | Xcode | 15.4 or later builds it. Xcode 26 additionally compiles the iOS 26 glass styling — see [Toolchains](#toolchains) |
 | An agent | See [connectonion](https://github.com/openonion/connectonion) — `pip install connectonion`, then `co init` |
 
