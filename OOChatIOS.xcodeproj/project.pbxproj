@@ -24,6 +24,7 @@
 		100000000000000000000114 /* SwiftDataConversationRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000018 /* SwiftDataConversationRepository.swift */; };
 		100000000000000000000116 /* ConversationRepositoryFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000020 /* ConversationRepositoryFactory.swift */; };
 		100000000000000000000109 /* HostedAgentClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000009 /* HostedAgentClient.swift */; };
+		990952282DCB4FEFBDD22DF3 /* AgentLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A33F8902AD24789890AE6C8 /* AgentLink.swift */; };
 		100000000000000000000110 /* MockHostedAgentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000013 /* MockHostedAgentTests.swift */; };
 		100000000000000000000115 /* SwiftDataConversationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000019 /* SwiftDataConversationRepositoryTests.swift */; };
 		100000000000000000000162 /* ViewTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000067 /* ViewTestSupport.swift */; };
@@ -136,6 +137,7 @@
 		100000000000000000000018 /* SwiftDataConversationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataConversationRepository.swift; sourceTree = "<group>"; };
 		100000000000000000000020 /* ConversationRepositoryFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRepositoryFactory.swift; sourceTree = "<group>"; };
 		100000000000000000000009 /* HostedAgentClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedAgentClient.swift; sourceTree = "<group>"; };
+		2A33F8902AD24789890AE6C8 /* AgentLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentLink.swift; sourceTree = "<group>"; };
 		100000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		100000000000000000000011 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		100000000000000000000012 /* OOChatIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OOChatIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -419,6 +421,7 @@
 				100000000000000000000349 /* HostedAgentEvent.swift */,
 				100000000000000000000350 /* HostedAgentSessionState.swift */,
 				100000000000000000000009 /* HostedAgentClient.swift */,
+				2A33F8902AD24789890AE6C8 /* AgentLink.swift */,
 				100000000000000000000054 /* HostedAgentDiscovery.swift */,
 				100000000000000000000055 /* HostedAgentConnectionPool.swift */,
 				100000000000000000000056 /* HostedAgentConnection.swift */,
@@ -649,6 +652,7 @@
 				100000000000000000000114 /* SwiftDataConversationRepository.swift in Sources */,
 				100000000000000000000116 /* ConversationRepositoryFactory.swift in Sources */,
 				100000000000000000000109 /* HostedAgentClient.swift in Sources */,
+				990952282DCB4FEFBDD22DF3 /* AgentLink.swift in Sources */,
 				100000000000000000000153 /* SettingsFeatureModel.swift in Sources */,
 				100000000000000000000148 /* HostedAgentInteractionCodec.swift in Sources */,
 				100000000000000000000192 /* HostedAgentTransport.swift in Sources */,
