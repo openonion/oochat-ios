@@ -683,7 +683,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                 configurations: ModelConfiguration(url: storeURL)
             )
             let context = ModelContext(container)
-            context.insert(StoredModelsSchemaV1.StoredConversation(
+            let seededV1 = StoredModelsSchemaV1.StoredConversation(
                 id: "v1-conversation",
                 title: "Before photos",
                 agentID: nil,
@@ -701,7 +701,12 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                         createdAt: seconds(1001)
                     ),
                 ]
-            ))
+            )
+            context.insert(seededV1)
+            for message in seededV1.messages {
+                context.insert(message)
+                message.conversation = seededV1
+            }
             try context.save()
         }
 
@@ -730,7 +735,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                 configurations: ModelConfiguration(url: storeURL)
             )
             let context = ModelContext(container)
-            context.insert(StoredModelsSchemaV2.StoredConversation(
+            let seededV2 = StoredModelsSchemaV2.StoredConversation(
                 id: "v2-conversation",
                 title: "Before files",
                 agentID: nil,
@@ -749,7 +754,12 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                         imageAttachmentsData: try JSONEncoder().encode([image])
                     ),
                 ]
-            ))
+            )
+            context.insert(seededV2)
+            for message in seededV2.messages {
+                context.insert(message)
+                message.conversation = seededV2
+            }
             try context.save()
         }
 
@@ -970,6 +980,15 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
         let container = try ModelContainer(for: schema, configurations: ModelConfiguration(url: storeURL))
         let context = ModelContext(container)
         try populate(context)
+        // Wire every message's inverse before saving. Assigning a conversation's
+        // `messages` array is enough on iOS 18 and later; on iOS 17 the
+        // back-reference stays nil, so the seeded store contains orphans and the
+        // repair step deletes them before the migration under test ever runs.
+        for conversation in try context.fetch(FetchDescriptor<LegacyStoredModels.StoredConversation>()) {
+            for message in conversation.messages where message.conversation == nil {
+                message.conversation = conversation
+            }
+        }
         try context.save()
     }
 

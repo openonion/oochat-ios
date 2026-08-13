@@ -117,7 +117,7 @@ final class SwiftDataConversationRepository: ConversationRepository {
             if let stored = try storedConversation(id: conversation.id) {
                 apply(conversation, to: stored)
             } else {
-                context.insert(toStoredConversation(conversation))
+                insertConversation(conversation)
             }
             try save()
         }
@@ -129,7 +129,7 @@ final class SwiftDataConversationRepository: ConversationRepository {
     ) -> Result<Void, ConversationRepositoryError> {
         capture(.saveConversation) {
             guard let stored = try storedConversation(id: conversation.id) else {
-                context.insert(toStoredConversation(conversation))
+                insertConversation(conversation)
                 try save()
                 return
             }
@@ -137,7 +137,9 @@ final class SwiftDataConversationRepository: ConversationRepository {
             if let storedMessage = stored.messages.first(where: { $0.messageID == message.id }) {
                 apply(message, to: storedMessage)
             } else {
-                stored.messages.append(toStoredMessage(message, conversationID: conversation.id))
+                let newMessage = insert(toStoredMessage(message, conversationID: conversation.id))
+                newMessage.conversation = stored
+                stored.messages.append(newMessage)
             }
             try save()
         }
@@ -148,7 +150,7 @@ final class SwiftDataConversationRepository: ConversationRepository {
     ) -> Result<Void, ConversationRepositoryError> {
         capture(.saveConversation) {
             guard let stored = try storedConversation(id: conversation.id) else {
-                context.insert(toStoredConversation(conversation))
+                insertConversation(conversation)
                 try save()
                 return
             }
@@ -319,8 +321,44 @@ final class SwiftDataConversationRepository: ConversationRepository {
                 // Existing rows keep their position while streamed tool results update in place.
                 apply(message, to: storedMessage)
             } else {
-                stored.messages.append(toStoredMessage(message, conversationID: stored.id))
+                let newMessage = insert(toStoredMessage(message, conversationID: stored.id))
+                newMessage.conversation = stored
+                stored.messages.append(newMessage)
             }
+        }
+    }
+
+    /// Register a message with the context explicitly rather than relying on it
+    /// being reachable through a persisted parent's to-many relationship.
+    ///
+    /// This is the documented shape and is kept for that reason. It is NOT the
+    /// cause of the iOS 17 persistence failures: those 22 tests fail identically
+    /// with and without it.
+    @discardableResult
+    private func insert(_ message: StoredMessage) -> StoredMessage {
+        context.insert(message)
+        return message
+    }
+
+    /// Insert a conversation and every message it arrived with.
+    ///
+    /// `toStoredConversation` builds the messages inside the initialiser, so this
+    /// registers them alongside the parent. Same caveat as `insert(_:)` — correct
+    /// practice, but not what makes iOS 17 fail.
+    private func insertConversation(_ conversation: Conversation) {
+        let stored = toStoredConversation(conversation)
+        context.insert(stored)
+        for message in stored.messages {
+            context.insert(message)
+            // Set the inverse explicitly. Assigning a parent's to-many array is
+            // enough on iOS 18 and later — SwiftData fills the back-reference in.
+            // On iOS 17 it does not, and a relationship written from one side only
+            // reads back empty from both: `upsert` returns success, the
+            // conversation is stored, and `conversation.messages` is [].
+            //
+            // That is what made 22 persistence tests fail on iOS 17.5 while
+            // passing on iOS 26 — the write never errored, so nothing surfaced.
+            message.conversation = stored
         }
     }
 
