@@ -1,0 +1,21 @@
+# Reviewed exceptions to the pre-publication audit.
+#
+# Format:  <path-prefix>  <rule-keyword>  # <reason>
+#
+# BOTH fields are required. A path-only waiver would hide every other rule on
+# that path, which defeats the point of the audit.
+# Waived hits are still printed; they only stop blocking.
+
+OOChatIOS/Core/Protocol/  endpoint  # Local-agent discovery: the client probes
+                                    # loopback for an agent running on the same
+                                    # machine before falling back to the relay.
+                                    # The literals are the probe list.
+OOChatIOSTests/           endpoint  # Tests feed loopback URLs into discovery and
+                                    # into private-IP classification. The address
+                                    # is the test input, not a shipped endpoint.
+README.md                 endpoint  # Documents the loopback probe above.
+
+OOChatIOS.xcodeproj/      github    # Swift Package dependencies resolve from their
+                                    # upstream repositories (swift-markdown-ui,
+                                    # NetworkImage, swift-cmark).
+.github/workflows/        github    # Release downloads for SwiftLint and Trivy.
