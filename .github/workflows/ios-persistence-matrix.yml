@@ -44,15 +44,18 @@ jobs:
           # Resolve by runtime rather than by device name: runner images change
           # their device line-up between releases, and a hardcoded name is the
           # first thing to break when they do.
+          # Resolve by runtime rather than by device name: runner images change
+          # their device line-up between releases, and a hardcoded name is the
+          # first thing to break when they do.
+          #
+          # jq, not an inline python heredoc — an embedded script's own
+          # indentation has to survive YAML's block scalar, and the first version
+          # of this step did not parse at all because of it.
+          want=$(echo "${{ matrix.ios }}" | tr '.' '-')
           udid=$(xcrun simctl list devices available --json \
-            | python3 -c "
-import json,sys
-want='${{ matrix.ios }}'.replace('.','-')
-d=json.load(sys.stdin)['devices']
-for runtime,devices in d.items():
-    if runtime.endswith('iOS-'+want) and devices:
-        print(devices[0]['udid']); break
-")
+            | jq -r --arg want "iOS-$want" \
+              '.devices | to_entries[] | select(.key | endswith($want)) | .value[0].udid // empty' \
+            | head -1)
           if [ -z "$udid" ]; then
             echo "::warning::No simulator for iOS ${{ matrix.ios }} on this runner"
             exit 78
