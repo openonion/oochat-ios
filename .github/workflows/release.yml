@@ -1,6 +1,7 @@
 name: Release
 
-# Push a tag like v1.0.1 and this archives the app. If the signing secrets are
+# Push a semantic-version tag like v2.0.1 and this reruns the release gates and
+# archives the app. If the signing secrets are
 # present it also exports a signed .ipa and uploads it to TestFlight; if they
 # are not, it stops after the unsigned archive and says so.
 #
@@ -11,6 +12,15 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version to rehearse (for example v2.0.1). Never publishes.
+        type: string
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -27,28 +37,76 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate version
+        id: version
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$DISPATCH_VERSION"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::'$tag' is not v<major>.<minor>.<patch>[-prerelease]."
+            exit 1
+          }
+          version="${tag#v}"
+          project_versions=$(sed -n 's/.*MARKETING_VERSION = \([^;]*\);/\1/p' "$PROJECT/project.pbxproj" | sort -u)
+          project_builds=$(sed -n 's/.*CURRENT_PROJECT_VERSION = \([^;]*\);/\1/p' "$PROJECT/project.pbxproj" | sort -u)
+          [ "$(printf '%s\n' "$project_versions" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] || {
+            echo "::error::Project has inconsistent marketing versions: $project_versions"
+            exit 1
+          }
+          [ "$project_versions" = "$version" ] || {
+            echo "::error::Tag $tag does not match MARKETING_VERSION $project_versions."
+            exit 1
+          }
+          [ "$(printf '%s\n' "$project_builds" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] || {
+            echo "::error::Project has inconsistent build numbers: $project_builds"
+            exit 1
+          }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$project_builds" >> "$GITHUB_OUTPUT"
+
+      - name: Run pre-publication audit
+        run: ./scripts/audit_repo.sh .
+
+      - name: Run tests and coverage gate
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
+            -parallel-testing-enabled NO \
+            -enableCodeCoverage YES \
+            -resultBundlePath build/ReleaseTests.xcresult \
+            -derivedDataPath build/ReleaseDerivedData
+          scripts/check_coverage.sh build/ReleaseTests.xcresult 70 OOChatIOS.app
 
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"
-
-      - name: Archive
-        run: |
-          set -o pipefail
-          xcodebuild archive \
-            -project "$PROJECT" -scheme "$SCHEME" \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath build/OpenOnion.xcarchive \
-            CODE_SIGNING_ALLOWED=NO
 
       - name: Check for signing secrets
         id: secrets
         env:
           CERT: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_P12_PASSWORD }}
+          PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
           KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
-          if [ -n "$CERT" ] && [ -n "$KEY" ]; then
+          if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$PROFILE" ] && \
+             [ -n "$KEY" ] && [ -n "$KEY_ID" ] && [ -n "$ISSUER_ID" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
@@ -56,6 +114,7 @@ jobs:
           fi
 
       - name: Import certificate and profile
+        id: signing
         if: steps.secrets.outputs.present == 'true'
         env:
           CERT: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
@@ -79,23 +138,70 @@ jobs:
 
           profiles=~/Library/MobileDevice/Provisioning\ Profiles
           mkdir -p "$profiles"
-          echo "$PROFILE" | base64 --decode > "$profiles/release.mobileprovision"
+          encoded_profile="$profiles/release.mobileprovision"
+          echo "$PROFILE" | base64 --decode > "$encoded_profile"
+          security cms -D -i "$encoded_profile" > build/profile.plist
+          profile_name=$(/usr/libexec/PlistBuddy -c 'Print :Name' build/profile.plist)
+          profile_uuid=$(/usr/libexec/PlistBuddy -c 'Print :UUID' build/profile.plist)
+          profile_team_id=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' build/profile.plist)
+          mv "$encoded_profile" "$profiles/$profile_uuid.mobileprovision"
+          echo "profile_name=$profile_name" >> "$GITHUB_OUTPUT"
+          echo "team_id=$profile_team_id" >> "$GITHUB_OUTPUT"
+
+      - name: Archive signed app
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          PROFILE_NAME: ${{ steps.signing.outputs.profile_name }}
+          TEAM_ID: ${{ steps.signing.outputs.team_id }}
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project "$PROJECT" -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/OpenOnion.xcarchive \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}"
+
+      - name: Archive unsigned app
+        if: steps.secrets.outputs.present != 'true'
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project "$PROJECT" -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/OpenOnion.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}"
 
       - name: Export signed IPA
         if: steps.secrets.outputs.present == 'true'
+        env:
+          PROFILE_NAME: ${{ steps.signing.outputs.profile_name }}
+          TEAM_ID: ${{ steps.signing.outputs.team_id }}
         run: |
-          cat > build/ExportOptions.plist <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>destination</key><string>export</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>teamID</key><string>APPLE_TEAM_ID</string>
-          </dict>
-          </plist>
-          PLIST
+          python3 - <<'PY'
+          import os
+          import plistlib
+
+          options = {
+              "method": "app-store-connect",
+              "destination": "export",
+              "signingStyle": "manual",
+              "teamID": os.environ["TEAM_ID"],
+              "provisioningProfiles": {
+                  "ai.openonion.app": os.environ["PROFILE_NAME"],
+              },
+          }
+          with open("build/ExportOptions.plist", "wb") as handle:
+              plistlib.dump(options, handle)
+          PY
           xcodebuild -exportArchive \
             -archivePath build/OpenOnion.xcarchive \
             -exportPath build/export \
@@ -115,22 +221,46 @@ jobs:
           xcrun altool --upload-app -f "$ipa" -t ios \
             --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
 
+      - name: Stage signed IPA
+        if: steps.secrets.outputs.present == 'true'
+        run: |
+          ipa=$(find build/export -name '*.ipa' | head -1)
+          filename="openonion-ios-${{ steps.version.outputs.tag }}.ipa"
+          cp "$ipa" "build/$filename"
+          (cd build && shasum -a 256 "$filename" > "$filename.sha256")
+
       - name: Package the archive
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          v="${{ steps.version.outputs.version }}"
           suffix=$([ "${{ steps.secrets.outputs.present }}" = "true" ] && echo "" || echo "-unsigned")
           cd build && zip -qry "openonion-ios-$v$suffix-xcarchive.zip" OpenOnion.xcarchive
           shasum -a 256 "openonion-ios-$v$suffix-xcarchive.zip" > "openonion-ios-$v$suffix-xcarchive.zip.sha256"
 
       - name: Publish the GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: OpenOnion iOS ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
           files: |
             build/*.zip
             build/*.sha256
+            build/*.ipa
           body: |
             Signed and uploaded to TestFlight: **${{ steps.secrets.outputs.present }}**
 
             When that says false, the attached archive is unsigned and cannot be
             installed on a device — the signing secrets were not configured.
+
+      - name: Upload dry-run artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: openonion-ios-${{ steps.version.outputs.tag }}-dry-run
+          path: |
+            build/*.zip
+            build/*.sha256
+            build/*.ipa
+          if-no-files-found: error
+          retention-days: 14

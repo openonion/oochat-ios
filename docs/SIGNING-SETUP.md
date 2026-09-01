@@ -4,29 +4,19 @@ Everything here needs the Apple account, so it is yours to do. Once the secrets
 are in the repository, `release.yml` handles the rest: tag, archive, sign,
 upload.
 
-## What already exists
+## Prerequisites
 
-Found on the machine that builds this, on 2026-08-14:
+Use an organisation-controlled Apple Developer account. The public repository
+contains no certificates, private keys, provisioning profiles, Team ID, or App
+Store Connect credentials.
 
 | | |
 |---|---|
-| Team | `APPLE_TEAM_ID` (Apple Developer) |
-| App Store record | `ai.openonion.app` — this project now uses that identifier |
-| Last approved version | **1.1.3**. The next upload must be higher; this project is set to `2.0.0` build `20` |
-| Private keys | **Present in the login keychain** — two `Apple Distribution` and three `Apple Development` identities |
-| Certificates | **Expired 2025-07-26**, both distribution ones |
-| Provisioning profile | `Onion`, for `ai.openonion.app` — **expired the same day** |
-| App Store Connect API key | **Not on this machine** |
-
-The private keys mattering is the good news: certificates are re-issued against
-a key you already hold, so nothing has to be rebuilt from scratch.
-
-The version number is not a guess. An archive from 2024-11-28 carries App
-Store's own rejection text:
-
-> The value for key CFBundleShortVersionString [1.1.3] in the Info.plist file
-> must contain a higher version than that of the previously approved version
-> [1.1.3]
+| Bundle identifier | `ai.openonion.app` |
+| Release version | `2.0.1`, build `21` |
+| Distribution certificate | A current Apple Distribution certificate with its private key |
+| Provisioning profile | An App Store Connect profile for `ai.openonion.app` |
+| API access | An App Store Connect API key with permission to upload builds |
 
 ## 1. Re-issue the distribution certificate
 
@@ -39,8 +29,8 @@ Certificates → Identifiers & Profiles at <https://developer.apple.com/account/
    Save the `.certSigningRequest`.
 3. Upload it, download the resulting `.cer`, double-click to add it to the
    keychain.
-4. In Keychain Access, find **Apple Distribution: Apple Developer (APPLE_TEAM_ID)** with
-   today's date, expand it to confirm a private key is nested underneath, then
+4. In Keychain Access, find the new **Apple Distribution** certificate, expand
+   it to confirm a private key is nested underneath, then
    right-click → **Export** → `.p12`. Set a password and remember it.
 
 If the expansion arrow shows no key underneath, the certificate was issued
@@ -86,14 +76,18 @@ base64 -i AuthKey_XXXXXX.p8 | pbcopy    # APP_STORE_CONNECT_API_KEY
 ## 5. Ship
 
 ```sh
-git tag v2.0.0
-git push origin v2.0.0
+git tag v2.0.1
+git push origin v2.0.1
 ```
 
 `release.yml` archives, signs, exports and uploads to TestFlight. With the
 secrets missing it still runs, publishing an unsigned archive and saying so in
 the release notes — so a tag never fails for the sole reason that credentials
 have not been added yet.
+
+For later releases, bump `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in
+the Xcode project first, let `main` CI pass, then push the matching semantic tag.
+The release workflow refuses a tag that does not equal `MARKETING_VERSION`.
 
 ## Before submitting for review
 

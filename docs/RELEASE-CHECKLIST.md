@@ -8,7 +8,7 @@ State of play and what is left. Written 2026-08-13, updated the same evening.
 |---|---|
 | Product name | **OpenOnion**. Checked the US, GB and AU stores for an exact match — none. `openonion` is also unclaimed on PyPI and npm. |
 | Bundle identifier | `ai.openonion.app`, matching the sibling clients |
-| Version | `1.0.0`, build `1` |
+| Version | `2.0.1`, build `21` |
 | Accent colour | ConnectOnion green (`#16A34A` light / `#4ADE80` dark), one ramp shared with the web client |
 | Builds | Xcode 15.4 and Xcode 26 both build it. Five sites compiled only against the newest toolchain and are now guarded — see [Toolchains](../README.md#toolchains) |
 | Runs | Installed and launched on an iPhone 15 simulator, iOS 17.5 |
@@ -18,7 +18,7 @@ State of play and what is left. Written 2026-08-13, updated the same evening.
 | Audit | `scripts/audit_repo.sh` exits 0; no student IDs, course codes or inherited URLs |
 | Tests | 323 pass, 0 fail, on an iOS 17.5 simulator. It was 298/25: every message written to a conversation was lost on iOS 17, silently — the write succeeded and the relationship read back empty. Fixed by setting the `conversation` inverse explicitly. `ios-persistence-matrix.yml` guards against it returning |
 
-## Blocked on credentials
+## Distribution signing status
 
 Nobody but the account holder should touch these, and nothing here can proceed
 without them.
@@ -29,10 +29,12 @@ without them.
    provisioning profile**
 4. Add all of it to this repository's Actions secrets
 
-Then `release.yml` can be extended: it already archives on a tag push, so what
-it needs is `xcodebuild -exportArchive` with an `ExportOptions.plist`, and an
-upload step. Until the secrets exist, adding that workflow would only produce a
-job that fails on every tag.
+The release workflow is complete: it validates the tag against the project
+version, reruns the audit/tests/coverage gate, creates an unsigned archive, and
+publishes it on GitHub. When all six signing secrets exist it additionally
+exports a signed IPA and uploads it to TestFlight. This repository currently has
+none of those secrets configured, so GitHub releases are source/unsigned-archive
+releases until the account holder completes the steps below.
 
 ## Needed for the listing, not for the build
 
@@ -60,10 +62,6 @@ even though every agent is one the user chose to add.
 
 ## Known gaps
 
-- **No URL scheme.** An agent is added by typing a 64-character hex address or by
-  scanning a QR code. There is no `openonion://agent/0x…` link, so an agent
-  cannot be handed over in an email or from a web page — which is how a customer
-  would most naturally receive one.
 - **No iPad layout.** It runs, using the phone layout.
 - **End-to-end connect is unverified from a clean install.** The app builds, runs
   and reaches the agent's discovery path; a live conversation has not been driven

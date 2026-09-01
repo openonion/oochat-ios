@@ -120,6 +120,11 @@ archive is unsigned. With the documented certificate, provisioning profile and
 App Store Connect secrets, the same workflow exports an IPA and uploads it to
 TestFlight.
 
+Release tags use `v<major>.<minor>.<patch>` and must match the project's
+`MARKETING_VERSION`. A manual workflow run is a dry run: it executes the same
+audit, tests, coverage check and archive build, then retains an Actions artifact
+without creating a GitHub Release.
+
 Forks must use their own Apple Developer account and replace the bundle ID,
 team, signing material and App Store Connect credentials.
 

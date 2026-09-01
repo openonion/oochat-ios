@@ -10,6 +10,7 @@ xcuserdata/
 
 # Secrets & Local Keys (Do not commit!)
 .co/
+.runtime/
 
 # Dependencies & Package Managers
 node_modules/
