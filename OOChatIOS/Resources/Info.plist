@@ -41,13 +41,13 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>ConnectOnion looks for hosted agents running on your local network.</string>
+	<string>OpenOnion looks for your hosted agents running on the local network.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>ConnectOnion uses the camera to scan agent QR codes.</string>
+	<string>OpenOnion uses the camera only when you scan an agent QR code.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>ConnectOnion uses the microphone to turn your speech into message text.</string>
+	<string>OpenOnion uses the microphone only when you dictate a message.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>ConnectOnion uses speech recognition to transcribe your voice into message text.</string>
+	<string>OpenOnion uses speech recognition only when you dictate a message.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiresFullScreen</key>

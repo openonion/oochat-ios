@@ -7,9 +7,9 @@ Native SwiftUI client for [ConnectOnion](https://docs.connectonion.com/) agents.
 Add an agent by its `0x…` address and talk to it from your phone — the same
 protocol the [web client](https://github.com/openonion/oo-chat) speaks.
 
-Ships as **OpenOnion** on the App Store. The repository and bundle identifier
-keep the `oochat` name they share with the other native clients; that name is
-for developers, not for the home screen.
+The product name is **OpenOnion**. The repository and bundle identifier keep the
+`oochat` name they share with the other native clients; that name is for
+developers, not for the home screen.
 
 ## Who this is for
 
@@ -44,8 +44,9 @@ is not enough.
 ### What it does not do
 
 - **No iPad-specific layout.** It runs on iPad, but the layout is the phone one
-- **Not on the App Store.** This is source you build and ship yourself; see
-  [Shipping it](#shipping-it)
+- App Store signing and review are separate from the source release. Forks need
+  their own Apple Developer account and distribution setup; see [Shipping
+  it](#shipping-it)
 - Speech recognition and the camera need the user's permission at first use; if
   either is refused, dictation and QR scanning are unavailable rather than
   degraded
@@ -113,13 +114,14 @@ three, or the palette drifts apart.
 
 ## Shipping it
 
-`.github/workflows/release.yml` archives the app when you push a tag, and
-publishes the archive on a GitHub Release.
+`.github/workflows/release.yml` archives the app when you push a tag and
+publishes the archive on a GitHub Release. Without Apple signing secrets the
+archive is unsigned. With the documented certificate, provisioning profile and
+App Store Connect secrets, the same workflow exports an IPA and uploads it to
+TestFlight.
 
-**That archive is unsigned.** Signing and distribution are your Apple Developer
-account's job, not this repository's: add your certificate, provisioning profile
-and App Store Connect key to your fork's secrets and extend the release workflow
-with `xcodebuild -exportArchive`.
+Forks must use their own Apple Developer account and replace the bundle ID,
+team, signing material and App Store Connect credentials.
 
 Having a developer account is not the same as being through review. Apple
 reviews every submission, and an app that connects to arbitrary agent endpoints
