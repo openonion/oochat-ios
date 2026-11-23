@@ -1,10 +1,13 @@
 import Combine
+import ConnectOnionKit
 import Foundation
 
 enum ConnectionRecoveryTrigger {
     case probe
     case pathRestored
     case userRetry
+    // active chat, for control center
+    case open
 }
 
 @MainActor
@@ -18,6 +21,7 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
     private(set) var probeTask: Task<Void, Never>?
     private(set) var launchFlushTask: Task<Void, Never>?
     private(set) var disconnectTask: Task<Void, Never>?
+    private(set) var openTask: Task<Void, Never>?
     /// A short interval keeps tests fast without allowing an invalid sleep duration.
     var probeInterval: TimeInterval = 5 {
         didSet {
@@ -25,6 +29,7 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
         }
     }
 
+    var onConnected: ((String) -> Void)?
     var onRecoveryError: ((String, Error) -> Void)?
     var onReconnect: ((SavedAgent) -> Void)?
     var onNetworkAvailabilityChange: ((Bool) -> Void)?
@@ -69,6 +74,7 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
         recoveryTask?.cancel()
         launchFlushTask?.cancel()
         disconnectTask?.cancel()
+        openTask?.cancel()
     }
 
     var shouldShowOfflineBanner: Bool {
@@ -79,6 +85,17 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
         networkMonitor.start()
     }
 
+    /// O Chat opens the socket as soon as an agent's chat is on screen: the host sends Control Center
+    func connectOnOpen(conversationID: String?) {
+        openTask?.cancel()
+        guard let conversationID, !isOffline, connectionState(forConversationID: conversationID) != .connected else {
+            return
+        }
+        openTask = Task { [weak self] in
+            _ = await self?.reconnect(conversationID: conversationID, trigger: .open)
+        }
+    }
+
     func connectionState(forConversationID conversationID: String) -> ConversationConnectionState {
         statesByConversationID[conversationID] ?? .disconnected
     }
@@ -87,7 +104,9 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
         _ state: ConversationConnectionState,
         forConversationID conversationID: String
     ) {
+        let wasConnected = statesByConversationID[conversationID] == .connected
         statesByConversationID[conversationID] = state
+        if state == .connected, !wasConnected { onConnected?(conversationID) }
     }
 
     func removeConnectionState(forConversationID conversationID: String) {
@@ -226,11 +245,38 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
         }
     }
 
+    /// Saves the session a connect returned. Opening a chat is not activity, so `.open` keeps the
+    /// conversation's place in the list.
+    private func storeSession(
+        _ session: [String: JSONValue]?,
+        for conversation: Conversation,
+        agent: SavedAgent,
+        trigger: ConnectionRecoveryTrigger
+    ) {
+        guard let session else {
+            return
+        }
+        var updated = conversationState.conversation(withID: conversation.id) ?? conversation
+        updated.agentID = agent.id
+        updated.agentAddress = agent.address
+        updated.serverSession = HostedAgentSessionState.applying(
+            updated.mode,
+            to: session,
+            conversationID: updated.id
+        )
+        if trigger == .open {
+            conversationState.replaceWithoutActivity(updated)
+        } else {
+            conversationState.upsert(updated)
+        }
+    }
+
     private func reconnect(
         conversationID: String,
         trigger: ConnectionRecoveryTrigger
     ) async -> Bool {
         guard let conversation = conversationState.conversation(withID: conversationID),
+              !conversationState.isFromPreviousIdentity(conversation),
               let agent = conversationState.agent(for: conversation),
               HostedAgentClient.isHostedAgentAddress(agent.address) else {
             return false
@@ -251,19 +297,15 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
             guard conversationState.conversation(withID: conversationID) != nil else {
                 return false
             }
-            if let session = result.serverSession {
-                var updated = conversationState.conversation(withID: conversationID) ?? conversation
-                updated.agentID = agent.id
-                updated.agentAddress = agent.address
-                updated.serverSession = HostedAgentSessionState.applying(
-                    updated.mode,
-                    to: session,
-                    conversationID: updated.id
-                )
-                conversationState.upsert(updated)
-            }
+            // Every CONNECTED carries the host's current mode list. Recording it only on the first connection or
+            // after a reply left Full Access mode hidden after the reconnect.
+            deliveryCoordinator.noteSessionModes(result.sessionModes, agentAddress: agent.address)
+            storeSession(result.serverSession, for: conversation, agent: agent, trigger: trigger)
             setConnectionState(.connected, forConversationID: conversationID)
-            onReconnect?(agent)
+            // Reconnect refreshes skills
+            if trigger != .open {
+                onReconnect?(agent)
+            }
             return true
         } catch is CancellationError {
             return false
@@ -273,7 +315,8 @@ final class ConnectionRecoveryCoordinator: ObservableObject {
             }
             if !silently {
                 setConnectionState(.disconnected, forConversationID: conversationID)
-                if conversationState.activeConversationID == conversationID {
+                // no banner for reopening chat
+                if trigger != .open, conversationState.activeConversationID == conversationID {
                     onRecoveryError?(conversationID, error)
                 }
             }

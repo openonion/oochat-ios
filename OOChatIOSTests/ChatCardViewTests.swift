@@ -13,7 +13,8 @@ final class PlanReviewCardTests: XCTestCase {
         let card = PlanReviewCard(
             review: makeReview(),
             onApprove: { approved = true },
-            onRequestChanges: { _ in XCTFail("unexpected request-changes") }
+            onRequestChanges: { _ in XCTFail("unexpected request-changes") },
+            onDiscard: { XCTFail("unexpected discard") }
         )
         let window = ViewHost.host(card)
 
@@ -26,12 +27,41 @@ final class PlanReviewCardTests: XCTestCase {
         let card = PlanReviewCard(
             review: makeReview(),
             onApprove: { XCTFail("unexpected approve") },
-            onRequestChanges: { feedback = $0 }
+            onRequestChanges: { feedback = $0 },
+            onDiscard: { XCTFail("unexpected discard") }
         )
         let window = ViewHost.host(card)
 
         XCTAssertTrue(ViewHost.activate(identifier: "plan.requestChanges.plan1", in: window))
         XCTAssertEqual(feedback, .some(""))
+    }
+
+    func testDiscardInvokesCallback() {
+        var discarded = false
+        let card = PlanReviewCard(
+            review: makeReview(),
+            onApprove: { XCTFail("unexpected approve") },
+            onRequestChanges: { _ in XCTFail("unexpected request-changes") },
+            onDiscard: { discarded = true }
+        )
+        let window = ViewHost.host(card)
+
+        XCTAssertTrue(ViewHost.activate(identifier: "plan.discard.plan1", in: window))
+        XCTAssertTrue(discarded)
+    }
+
+    func testPlanIsRenderedAsMarkdown() {
+        let card = PlanReviewCard(
+            review: makeReview(plan: "## Steps\n\n1. **Read** the file"),
+            onApprove: {},
+            onRequestChanges: { _ in },
+            onDiscard: {}
+        )
+        let window = ViewHost.host(card)
+
+        XCTAssertNotNil(ViewHost.element(labelContains: "Steps", in: window))
+        XCTAssertNil(ViewHost.element(labelContains: "## Steps", in: window))
+        XCTAssertNil(ViewHost.element(labelContains: "**Read**", in: window))
     }
 }
 
@@ -52,12 +82,38 @@ final class MessageBubbleTests: XCTestCase {
         }
     }
 
-    func testThinkingIndicatorAnimatesAndHandlesEmptyText() {
-        _ = ViewHost.host(MessageBubble(message: message(role: .thinking, content: "Pondering")))
-        ViewHost.pump(0.3)
+    func testWaitingRowNamesTheAgentAndCountsSeconds() {
+        let bubble = MessageBubble(
+            message: ChatMessage(role: .thinking, content: "", createdAt: Date().addingTimeInterval(-3)),
+            agentName: "Scout"
+        )
+        let window = ViewHost.host(bubble)
 
-        _ = ViewHost.host(MessageBubble(message: message(role: .thinking, content: "")))
-        ViewHost.pump(0.3)
+        XCTAssertNotNil(ViewHost.element(labelContains: "Waiting for Scout · 3 s", in: window))
+        XCTAssertNil(ViewHost.element(labelContains: "Stop Scout", in: window), "Stop waits for 10 s")
+    }
+
+    func testWaitingRowOffersStopAfterTenSeconds() {
+        var stopped = false
+        let bubble = MessageBubble(
+            message: ChatMessage(role: .thinking, content: "", createdAt: Date().addingTimeInterval(-12)),
+            agentName: "Scout",
+            onStop: { stopped = true }
+        )
+        let window = ViewHost.host(bubble)
+
+        XCTAssertTrue(ViewHost.activate(labelContains: "Stop Scout", in: window))
+        XCTAssertTrue(stopped)
+    }
+
+    func testWaitingRowHasNoStopWhenNothingCanBeStopped() {
+        let bubble = MessageBubble(
+            message: ChatMessage(role: .thinking, content: "", createdAt: Date().addingTimeInterval(-12)),
+            agentName: "Scout"
+        )
+        let window = ViewHost.host(bubble)
+
+        XCTAssertNil(ViewHost.element(labelContains: "Stop Scout", in: window))
     }
 
     func testQueuedDeliveryShowsQueuedBadge() {
@@ -97,7 +153,7 @@ final class MessageBubbleTests: XCTestCase {
                     name: "notes.txt",
                     data: Data("hello".utf8),
                     mimeType: "text/plain"
-                ),
+                )
             ]
         )
         let window = ViewHost.host(MessageBubble(message: fileMessage))
@@ -138,20 +194,28 @@ final class UlwCheckpointCardTests: XCTestCase {
         )
     }
 
-    func testAllThreeActionsInvokeCallbacks() {
+    func testBothActionsInvokeCallbacks() {
         var taps: [String] = []
         let card = UlwCheckpointCard(
             checkpoint: makeCheckpoint(),
             onContinue: { taps.append("continue") },
-            onAcceptEdits: { taps.append("accept") },
-            onSafeMode: { taps.append("safe") }
+            onSwitchToAuto: { taps.append("auto") }
         )
         let window = ViewHost.host(card)
 
         XCTAssertTrue(ViewHost.activate(identifier: "ulw.continue.ulw1", in: window))
-        XCTAssertTrue(ViewHost.activate(identifier: "ulw.acceptEdits.ulw1", in: window))
-        XCTAssertTrue(ViewHost.activate(identifier: "ulw.safe.ulw1", in: window))
-        XCTAssertEqual(taps, ["continue", "accept", "safe"])
+        XCTAssertTrue(ViewHost.activate(identifier: "ulw.auto.ulw1", in: window))
+        XCTAssertEqual(taps, ["continue", "auto"])
+    }
+
+    func testCardUsesTheModeNamesFromTheMenu() {
+        let card = UlwCheckpointCard(checkpoint: makeCheckpoint(), onContinue: {}, onSwitchToAuto: {})
+        let window = ViewHost.host(card)
+
+        XCTAssertNotNil(ViewHost.element(labelContains: "Full access checkpoint", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Continue \(UlwCheckpointDecision.continueTurns) turns", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Switch to Auto", in: window))
+        XCTAssertNil(ViewHost.element(labelContains: "Accept Edits", in: window))
     }
 }
 
@@ -213,7 +277,7 @@ final class AskUserCardTests: XCTestCase {
             question: "Credentials",
             fields: [
                 AskUserField(name: "user", label: "Username", placeholder: "you@example.com"),
-                AskUserField(name: "pass", label: "Password", type: "password"),
+                AskUserField(name: "pass", label: "Password", type: "password")
             ]
         )
         let window = ViewHost.host(AskUserCard(pending: pending(request)) { _ in })
@@ -250,35 +314,35 @@ final class ApprovalCardTests: XCTestCase {
             tool: "run_command",
             arguments: [
                 "cmd": .string("ls -la"),
-                "cwd": .string("/tmp"),
+                "cwd": .string("/tmp")
             ],
             description: "Lists the directory",
             batchRemaining: [ToolApprovalBatchItem(tool: "read_file")]
         )
         let window = ViewHost.host(makeCard(request: request))
 
-        XCTAssertTrue(ViewHost.activate(labelContains: "Command", in: window))
-        XCTAssertTrue(ViewHost.activate(labelContains: "Command", in: window))
-
         XCTAssertTrue(ViewHost.activate(identifier: "approval.allowOnce.appr1", in: window))
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.more.appr1", in: window))
         XCTAssertTrue(ViewHost.activate(identifier: "approval.trustSession.appr1", in: window))
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.trustConfirm.appr1", in: window))
         XCTAssertTrue(ViewHost.activate(identifier: "approval.skip.appr1", in: window))
         XCTAssertTrue(ViewHost.activate(identifier: "approval.stop.appr1", in: window))
         XCTAssertTrue(ViewHost.activate(identifier: "approval.explain.appr1", in: window))
         XCTAssertEqual(receivedActions, ["allow", "trust", "skip", "stop", "explain"])
     }
 
-    func testLongCommandUsesGenericTrustTitle() {
+    func testTrustTitleNamesTheTool() {
         let request = ToolApprovalRequest(
             id: "appr2",
             tool: "run_command",
             arguments: ["command": .string("find / -name something-very-long -print0")]
         )
         let window = ViewHost.host(makeCard(request: request))
-        XCTAssertNotNil(ViewHost.element(labelContains: "Trust this command", in: window))
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.more.appr2", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Trust all run_command calls", in: window))
     }
 
-    func testNonCommandRequestShowsToolNameAndPathSubtitle() {
+    func testNonCommandRequestLeadsWithThePlainSummary() {
         let request = ToolApprovalRequest(
             id: "appr3",
             tool: "write_file",
@@ -286,8 +350,9 @@ final class ApprovalCardTests: XCTestCase {
         )
         let window = ViewHost.host(makeCard(request: request))
 
-        XCTAssertNotNil(ViewHost.element(labelContains: "Write File", in: window))
-        XCTAssertNotNil(ViewHost.element(labelContains: "Trust this tool", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Create or replace out.txt", in: window))
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.more.appr3", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Trust all write_file calls", in: window))
         XCTAssertTrue(ViewHost.activate(identifier: "approval.allowOnce.appr3", in: window))
         XCTAssertEqual(receivedActions, ["allow"])
     }
@@ -306,7 +371,70 @@ final class ApprovalCardTests: XCTestCase {
             arguments: ["script": .string("echo hi")]
         )
         let window = ViewHost.host(makeCard(request: scriptRequest))
-        XCTAssertNotNil(ViewHost.element(labelContains: "Trust echo hi", in: window))
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.more.appr5", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Trust all run_script calls", in: window))
+    }
+
+    func testConfirmStepNamesTheToolBeingTrusted() {
+        let request = ToolApprovalRequest(
+            id: "appr6",
+            tool: "bash",
+            arguments: ["command": .string("ls")]
+        )
+        let window = ViewHost.host(makeCard(request: request))
+
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.more.appr6", in: window))
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.trustSession.appr6", in: window))
+        XCTAssertNotNil(ViewHost.element(identifier: "approval.trustCancel.appr6", in: window))
+        XCTAssertNotNil(ViewHost.element(
+            identifier: "approval.trustConfirm.appr6",
+            labelContains: "Trust all bash calls",
+            in: window
+        ))
+    }
+
+    func testCardStatesTheConsequenceOnceWithNoScopeRow() {
+        let request = ToolApprovalRequest(
+            id: "appr7",
+            tool: "run_command",
+            arguments: ["cmd": .string("rm -rf build")]
+        )
+        let window = ViewHost.host(makeCard(request: request))
+
+        XCTAssertNotNil(ViewHost.element(labelContains: "Runs on the agent's host", in: window))
+        XCTAssertNil(ViewHost.element(labelContains: "Scope", in: window))
+    }
+
+    func testUnknownToolPointsAtTheValuesBelow() {
+        let request = ToolApprovalRequest(
+            id: "appr8",
+            tool: "custom_action",
+            arguments: ["target": .string("inbox")]
+        )
+        let window = ViewHost.host(makeCard(request: request))
+
+        XCTAssertNotNil(ViewHost.element(labelContains: "Check the values shown below", in: window))
+        XCTAssertNil(ViewHost.element(labelContains: "shown above", in: window))
+    }
+
+    func testSecondaryActionsStayBehindMore() {
+        let request = ToolApprovalRequest(
+            id: "appr8",
+            tool: "bash",
+            arguments: ["command": .string("ls")]
+        )
+        let window = ViewHost.host(makeCard(request: request))
+
+        XCTAssertNotNil(ViewHost.element(identifier: "approval.allowOnce.appr8", in: window))
+        XCTAssertNotNil(ViewHost.element(identifier: "approval.skip.appr8", in: window))
+        XCTAssertNil(ViewHost.element(identifier: "approval.explain.appr8", in: window))
+        XCTAssertNil(ViewHost.element(identifier: "approval.trustSession.appr8", in: window))
+        XCTAssertNil(ViewHost.element(identifier: "approval.stop.appr8", in: window))
+
+        XCTAssertTrue(ViewHost.activate(identifier: "approval.more.appr8", in: window))
+        XCTAssertNotNil(ViewHost.element(identifier: "approval.explain.appr8", in: window))
+        XCTAssertNotNil(ViewHost.element(identifier: "approval.trustSession.appr8", in: window))
+        XCTAssertNotNil(ViewHost.element(identifier: "approval.stop.appr8", in: window))
     }
 }
 

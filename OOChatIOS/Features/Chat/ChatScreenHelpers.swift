@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 extension ChatScreen {
@@ -18,41 +19,38 @@ extension ChatScreen {
         }
     }
 
-    // `sharedBackgroundVisibility` is an iOS 26 API. The `#available` check keeps it
-    // safe at run time, but availability does not help at COMPILE time: the symbol
-    // has to exist in the SDK being built against, and an older SDK fails outright.
-    // The compiler check compiles the whole branch out on toolchains that predate
-    // the API, so this file builds on Xcode 15 as well as Xcode 26 — where the
-    // iOS 26 polish (suppressing the empty glass capsule behind a hidden toolbar
-    // item) is still applied. Swift 6.2 is the version that ships with Xcode 26,
-    // and is used here as a proxy for "the iOS 26 SDK is present".
-    @ToolbarContentBuilder
-    var trailingBalanceItem: some ToolbarContent {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            ToolbarItem(placement: .topBarTrailing) {
-                hiddenSidebarButtonMirror
-            }
-            .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .topBarTrailing) {
-                hiddenSidebarButtonMirror
-            }
-        }
-        #else
+    /// New chat sits opposite the sidebar button, so the title stays centred. Tap starts a chat
+    /// with the current agent, the same as the drawer's New chat; hold to pick another agent.
+    var newChatItem: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            hiddenSidebarButtonMirror
+            Menu {
+                ForEach(viewModel.chattableAgents) { agent in
+                    Button(agent.displayName) {
+                        _ = viewModel.createConversation(for: agent)
+                    }
+                }
+            } label: {
+                // No frame of our own: the bar already makes it a 44 pt circle. A bigger frame
+                // makes it wider than the sidebar button and pushes the title off centre.
+                Image(systemName: "square.and.pencil")
+                    .foregroundStyle(OOColor.primary)
+            } primaryAction: {
+                startNewChat()
+            }
+            .tint(OOColor.primary)
+            .accessibilityLabel(viewModel.newChatAgent.map { "New chat with \($0.displayName)" } ?? "New chat")
+            .accessibilityHint("Hold to choose an agent")
+            .accessibilityIdentifier("chat.newChat")
         }
-        #endif
     }
 
-    private var hiddenSidebarButtonMirror: some View {
-        Button {
-        } label: {
-            Image(systemName: "sidebar.left")
+    /// With no agent to chat with, New chat adds one instead, as in the drawer.
+    func startNewChat() {
+        guard let agent = viewModel.newChatAgent else {
+            onAddAgent()
+            return
         }
-        .hidden()
-        .accessibilityHidden(true)
+        _ = viewModel.createConversation(for: agent)
     }
 
     func scrollTarget(for interactionID: String) -> String {
@@ -68,27 +66,45 @@ extension ChatScreen {
         return "pendingAskUser"
     }
 
-    func shouldShowMessage(_ message: ChatMessage, in conversationID: String) -> Bool {
-        !viewModel.isToolCallCoveredByPendingApproval(message, in: conversationID)
-    }
-
+    // The tool the approval card asks about stays in the timeline, marked Awaiting approval:
+    // the card is where you decide, the row is the record of what's happening.
     func timelineEntries(for conversation: Conversation) -> [ChatTimelineEntry] {
         ChatTimelineBuilder.entries(
-            from: conversation.messages.filter {
-                shouldShowMessage($0, in: conversation.id)
-            }
+            from: conversation.messages,
+            workRooms: viewModel.conversationState.workRoomStore(for: conversation.id)
+        )
+    }
+
+    func messageMenu(for message: ChatMessage) -> MessageMenu {
+        MessageMenu(
+            canEdit: viewModel.canEdit(message),
+            canRetry: viewModel.canRetry(message),
+            onEdit: { viewModel.editLatestMessage(to: $0) },
+            onRetry: { viewModel.retryLatestReply() }
         )
     }
 
     @ViewBuilder
-    func timelineView(for entry: ChatTimelineEntry) -> some View {
+    func timelineView(for entry: ChatTimelineEntry, offersRetry: Bool) -> some View {
         switch entry {
         case .message(let message):
-            MessageBubble(message: message) {
-                viewModel.retryMessage(message)
-            }
+            let failure = message.deliveryState == .failed ? viewModel.failure(forMessageID: message.id) : nil
+            MessageBubble(
+                message: message,
+                menu: messageMenu(for: message),
+                failureReason: failure?.reason,
+                failureDetails: failure?.details,
+                agentName: viewModel.activeAgent?.displayName ?? "Agent",
+                onStop: viewModel.isProcessing ? { viewModel.stopActiveResponse() } : nil,
+                onRetry: offersRetry ? { viewModel.retryMessage(message) } : nil
+            )
         case .toolCallGroup(let messages):
             ToolCallGroupView(messages: messages)
+        case .workRoom(let workRoom):
+            let store = viewModel.activeConversationID.map { viewModel.conversationState.workRoomStore(for: $0) }
+            OOWorkRoomCard(workRoom: workRoom, onOpen: {
+                onOpenWorkRoom(workRoom.id)
+            }, onDecide: { store?.decide($0, in: workRoom.id) })
         }
     }
 
@@ -110,6 +126,45 @@ extension ChatScreen {
         }
         shouldFollowLatest = bottomAnchorY - scrollViewportHeight
             <= ChatScrollMetrics.followThreshold
+        if shouldFollowLatest {
+            hasUnseenLatest = false
+        }
+    }
+
+    /// About 1.5 screens above the newest message, measured in the chat's own height.
+    var isFarFromLatest: Bool {
+        scrollViewportHeight > 0
+            && bottomAnchorY - scrollViewportHeight
+                > scrollViewportHeight * ChatScrollMetrics.jumpToLatestScreens
+    }
+
+    /// Shown while you're scrolled up; brings you back to the newest message.
+    @ViewBuilder
+    func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
+        if isFarFromLatest {
+            Button {
+                scrollToBottom(proxy)
+            } label: {
+                Image(systemName: "arrow.down")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(OOColor.ink)
+                    .frame(width: ooMinimumTarget, height: ooMinimumTarget)
+                    .background(OOColor.paper, in: Circle())
+                    .overlay(Circle().stroke(OOColor.hairline, lineWidth: 1))
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+                    .overlay(alignment: .topTrailing) {
+                        if hasUnseenLatest {
+                            Circle()
+                                .fill(OOColor.primary)
+                                .frame(width: 10, height: 10)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(hasUnseenLatest ? "Jump to latest, new messages" : "Jump to latest")
+            .padding(.bottom, 24)
+            .transition(reduceMotion ? .opacity : .scale(scale: 0.8).combined(with: .opacity))
+        }
     }
 
     func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {

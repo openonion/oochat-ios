@@ -1,12 +1,20 @@
 import SwiftUI
+import ConnectOnionKit
 
 extension Composer {
     var inputBar: some View {
         HStack(alignment: .center, spacing: ComposerMetrics.inputSpacing) {
             attachmentMenu
 
-            TextField("Message the agent", text: $viewModel.prompt, axis: .vertical)
+            // What you type is ink; only the placeholder is the secondary grey.
+            TextField(
+                "Message the agent",
+                text: $viewModel.prompt,
+                prompt: Text("Message the agent").foregroundStyle(OOColor.inkSecondary),
+                axis: .vertical
+            )
                 .font(.body)
+                .foregroundStyle(OOColor.ink)
                 .lineLimit(1...4)
                 .focused($isPromptFocused)
                 .tint(AppTheme.primary)
@@ -85,6 +93,7 @@ extension Composer {
                         )
                 }
             }
+            .frame(width: ooMinimumTarget, height: ooMinimumTarget)
             .contentShape(Rectangle())
         }
         .buttonStyle(AppPressButtonStyle(pressedScale: 0.92, pressedOpacity: 0.85))
@@ -125,6 +134,8 @@ extension Composer {
                     tint: AppTheme.primary
                 )
                 .contentTransition(.symbolEffect(.replace))
+                .frame(width: ooMinimumTarget, height: ooMinimumTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(AppPressButtonStyle(pressedScale: 0.92, pressedOpacity: 0.90))
         .disabled(

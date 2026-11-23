@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import MarkdownUI
 import SwiftUI
 import UIKit
@@ -30,7 +31,6 @@ struct MarkdownMessageView: View {
                 FontSize(16)
                 BackgroundColor(nil)
             }
-            .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -62,7 +62,8 @@ private struct MarkdownCodeBlockView: View {
                     }
                 } label: {
                     Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                        .frame(width: 44, height: 44)
+                        .frame(width: ooMinimumTarget, height: ooMinimumTarget)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isCopied ? "Code copied" : "Copy code")

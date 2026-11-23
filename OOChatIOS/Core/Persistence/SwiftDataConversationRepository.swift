@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import ConnectOnionKit
 
 @MainActor
 final class SwiftDataConversationRepository: ConversationRepository {
@@ -8,7 +9,7 @@ final class SwiftDataConversationRepository: ConversationRepository {
     private let defaults: UserDefaults
     private let activeAgentKey = "connectonion.native-ios.swiftdata.activeAgent"
     private let activeConversationKey = "connectonion.native-ios.swiftdata.activeConversation"
-
+    private let draftsKey = "connectonion.native-ios.swiftdata.drafts"
 
     init(inMemory: Bool = false, storeURL: URL? = nil, defaults: UserDefaults = .standard) throws {
         self.defaults = defaults
@@ -18,7 +19,7 @@ final class SwiftDataConversationRepository: ConversationRepository {
         } else {
             configuration = ModelConfiguration(isStoredInMemoryOnly: inMemory)
         }
-        let schema = Schema(versionedSchema: StoredModelsSchemaV4.self)
+        let schema = Schema(versionedSchema: StoredModelsSchemaV6.self)
         do {
             container = try ModelContainer(
                 for: schema,
@@ -210,6 +211,18 @@ final class SwiftDataConversationRepository: ConversationRepository {
         setActive(conversationID, forKey: activeConversationKey)
     }
 
+    func loadDrafts() -> [String: String] {
+        defaults.dictionary(forKey: draftsKey) as? [String: String] ?? [:]
+    }
+
+    func saveDrafts(_ drafts: [String: String]) {
+        if drafts.isEmpty {
+            defaults.removeObject(forKey: draftsKey)
+        } else {
+            defaults.set(drafts, forKey: draftsKey)
+        }
+    }
+
     /// Case- and diacritic-insensitive search over conversation titles and message content,
     /// run as two indexed `#Predicate` fetches and unioned by conversation.
     func search(_ query: String) -> [Conversation] {
@@ -240,8 +253,6 @@ final class SwiftDataConversationRepository: ConversationRepository {
             return matched.values.map(toConversation).sorted { $0.updatedAt > $1.updatedAt }
         }
     }
-
-
 
     private func storedAgent(id: String) throws -> StoredAgent? {
         try context.fetch(FetchDescriptor<StoredAgent>(predicate: #Predicate { $0.id == id })).first
@@ -282,8 +293,6 @@ final class SwiftDataConversationRepository: ConversationRepository {
         }
     }
 
-
-
     private func apply(_ agent: SavedAgent, to stored: StoredAgent) {
         stored.name = agent.name
         stored.address = agent.address
@@ -304,6 +313,9 @@ final class SwiftDataConversationRepository: ConversationRepository {
         stored.createdAt = conversation.createdAt
         stored.updatedAt = conversation.updatedAt
         stored.serverSessionData = encodeSession(conversation.serverSession)
+        stored.identityAddress = conversation.identityAddress
+        stored.tombstoneUpdated = conversation.tombstoneUpdated
+        stored.hostUpdated = conversation.hostUpdated
     }
 
     private func syncMessages(_ messages: [ChatMessage], of stored: StoredConversation) {
@@ -373,8 +385,6 @@ final class SwiftDataConversationRepository: ConversationRepository {
         stored.toolStateRaw = message.toolState?.rawValue
     }
 
-
-
     private func toAgent(_ stored: StoredAgent) -> SavedAgent {
         SavedAgent(
             id: stored.id,
@@ -397,7 +407,10 @@ final class SwiftDataConversationRepository: ConversationRepository {
             messages: stored.messages
                 .sorted { $0.createdAt < $1.createdAt }
                 .map(toMessage),
-            serverSession: decodeSession(stored.serverSessionData)
+            serverSession: decodeSession(stored.serverSessionData),
+            identityAddress: stored.identityAddress,
+            tombstoneUpdated: stored.tombstoneUpdated,
+            hostUpdated: stored.hostUpdated
         )
     }
 
@@ -436,6 +449,9 @@ final class SwiftDataConversationRepository: ConversationRepository {
             createdAt: conversation.createdAt,
             updatedAt: conversation.updatedAt,
             serverSessionData: encodeSession(conversation.serverSession),
+            identityAddress: conversation.identityAddress,
+            tombstoneUpdated: conversation.tombstoneUpdated,
+            hostUpdated: conversation.hostUpdated,
             messages: conversation.messages.map { toStoredMessage($0, conversationID: conversation.id) }
         )
     }
