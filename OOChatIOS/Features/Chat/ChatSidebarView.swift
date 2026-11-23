@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 struct ChatSidebarView: View {
@@ -11,6 +12,9 @@ struct ChatSidebarView: View {
     let onAddChat: (SavedAgent) -> Void
     let onConnected: () -> Void
     let onSettings: () -> Void
+    /// Each change opens the Add Agent form (sent from the chat's empty state).
+    var addAgentRequest = 0
+    var onSelectStation: (SavedAgent) -> Void = { _ in }
 
     @State private var expandedAgentIDs = Set<String>()
     @State private var deleteTarget: Conversation?
@@ -29,7 +33,7 @@ struct ChatSidebarView: View {
     var body: some View {
         sheets(alerts(baseContent))
     }
-    
+
     private var baseContent: some View {
         ZStack(alignment: .bottom) {
             sidebarList
@@ -42,7 +46,7 @@ struct ChatSidebarView: View {
             footer
         }
         .background {
-            Color(.systemBackground)
+            OOColor.surface
                 .ignoresSafeArea()
         }
         .onAppear {
@@ -61,6 +65,9 @@ struct ChatSidebarView: View {
                 expandedAgentIDs.insert(activeAgentID)
                 focusedAgentID = activeAgentID
             }
+        }
+        .onChange(of: addAgentRequest) {
+            beginAddingAgent()
         }
         .onChange(of: isSidebarOpen) {
             if !isSidebarOpen {
@@ -174,12 +181,17 @@ struct ChatSidebarView: View {
                 .listRowBackground(Color.clear)
 
             if viewModel.agents.isEmpty {
-                Text("No agents connected")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .listRowInsets(SidebarMetrics.emptyRowInsets)
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
+                Button(action: beginAddingAgent) {
+                    Label("Add agent", systemImage: "plus")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppTheme.primary)
+                        .frame(maxWidth: .infinity, minHeight: ooMinimumTarget, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(SidebarMetrics.emptyRowInsets)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             } else if visibleAgents.isEmpty {
                 Text("No matches")
                     .font(.subheadline)
@@ -325,7 +337,12 @@ struct ChatSidebarView: View {
             isExpanded: expandedAgentIDs.contains(agent.id),
             isOnline: viewModel.isAgentOnline(agent),
             onToggle: {
-                toggleAgent(agent)
+                if viewModel.isStation(agent) {
+                    focusedAgentID = agent.id
+                    onSelectStation(agent)
+                } else {
+                    toggleAgent(agent)
+                }
             },
             onRename: {
                 beginRenaming(agent)
@@ -343,7 +360,8 @@ struct ChatSidebarView: View {
             },
             onDelete: {
                 agentDeleteTarget = agent
-            }
+            },
+            isStation: viewModel.isStation(agent)
         )
     }
 

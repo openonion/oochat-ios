@@ -1,9 +1,16 @@
 import Foundation
+import ConnectOnionKit
 
 enum HostedAgentEvent: Equatable {
     case toolCall(id: String, name: String, arguments: [String: JSONValue])
     case toolResult(id: String, name: String?, output: String, state: ToolCallState)
-    case modeChanged(ChatMode)
+
+    case modeChanged(mode: OIPPermissionMode, turnsLeft: Int?)
+    case modeChangeFailed(String)
+    case modeChangeTimedOut
+
+    /// A decoded provider frame (invocation, activity, message or interrupt ack), for the conversation's Work Room store.
+    case providerFrame(OIPServerFrame)
 
     static func from(_ frame: [String: JSONValue]) -> HostedAgentEvent? {
         guard let type = frame["type"]?.stringValue else {
@@ -11,9 +18,21 @@ enum HostedAgentEvent: Equatable {
         }
 
         if type == "mode_changed",
-           let rawMode = frame["mode"]?.stringValue,
-           let mode = ChatMode(rawValue: rawMode) {
-            return .modeChanged(mode)
+            let rawMode = frame["mode"]?.stringValue {
+            return .modeChanged(
+                mode: OIPPermissionMode(protocolValue: rawMode),
+                turnsLeft: frame["turns_left"]?.intValue
+            )
+        }
+
+        let providerTypes = [
+            OIPFrameType.providerInvocation, OIPFrameType.providerActivity, OIPFrameType.providerMessage,
+            OIPFrameType.providerInterruptAck, OIPFrameType.providerInputAck, OIPFrameType.providerPermissionAck,
+            OIPFrameType.providerStationAttachAck, OIPFrameType.providerSession, OIPFrameType.providerControlAck,
+            OIPFrameType.providerArtifact
+        ]
+        if providerTypes.contains(type) {
+            return .providerFrame(OIPServerFrame.decode(frame))
         }
 
         guard let id = frame["tool_id"]?.stringValue ?? frame["id"]?.stringValue,

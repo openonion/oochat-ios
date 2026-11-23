@@ -1,10 +1,27 @@
 import SwiftUI
+import ConnectOnionKit
 import UIKit
 import UniformTypeIdentifiers
 
+/// What a long-press on a message offers besides Copy.
+struct MessageMenu {
+    var canEdit = false
+    var canRetry = false
+    var onEdit: (String) -> Void = { _ in }
+    var onRetry: () -> Void = {}
+}
+
 struct MessageBubble: View {
     let message: ChatMessage
-    var onRetry: (() -> Void)? = nil
+    var menu = MessageMenu()
+    /// Why a failed message wasn't sent, when the app still knows.
+    var failureReason: String?
+    /// The raw error, offered as "Copy error details".
+    var failureDetails: String?
+    var onRetry: (() -> Void)?
+    // The text being edited in place; nil while the bubble shows the sent message.
+    @State private var editDraft: String?
+    @FocusState private var isEditorFocused: Bool
     @State private var previewedImage: ChatImageAttachment?
     @State private var downloadDocument: ChatFileDocument?
     @State private var downloadFilename = "Attachment"
@@ -48,18 +65,81 @@ struct MessageBubble: View {
                 if !message.files.isEmpty {
                     fileList
                 }
-                if !message.content.isEmpty {
+                if editDraft != nil {
+                    messageEditor
+                } else if !message.content.isEmpty {
                     Text(message.content)
-                        .textSelection(.enabled)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                         .background(
                             AppTheme.outgoingMessageBackground,
                             in: RoundedRectangle(cornerRadius: 20, style: .continuous)
                         )
+                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .contextMenu { messageMenuItems }
                 }
                 deliveryStatus
             }
+        }
+    }
+
+    @ViewBuilder
+    private var messageMenuItems: some View {
+        Button {
+            UIPasteboard.general.string = message.content
+        } label: {
+            Label("Copy", systemImage: "doc.on.doc")
+        }
+        if menu.canEdit {
+            Button {
+                editDraft = message.content
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+        }
+        if menu.canRetry {
+            Button(action: menu.onRetry) {
+                Label("Retry", systemImage: "arrow.clockwise")
+            }
+        }
+    }
+
+    // Your message, editable where it sits. Send has the agent answer it again in place.
+    private var messageEditor: some View {
+        let draft = Binding(get: { editDraft ?? "" }, set: { editDraft = $0 })
+        let trimmed = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canSend = !trimmed.isEmpty && trimmed != message.content
+        return VStack(alignment: .trailing, spacing: 8) {
+            TextField("Message", text: draft, axis: .vertical)
+                .lineLimit(1...8)
+                .focused($isEditorFocused)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(
+                    AppTheme.outgoingMessageBackground,
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(OOColor.primary, lineWidth: 1.5)
+                )
+            HStack(spacing: 8) {
+                Button("Cancel") {
+                    editDraft = nil
+                }
+                .buttonStyle(CardQuietButtonStyle())
+                .fixedSize()
+                Button("Send") {
+                    menu.onEdit(trimmed)
+                    editDraft = nil
+                }
+                .buttonStyle(CardPrimaryButtonStyle())
+                .frame(width: 96)
+                .disabled(!canSend)
+            }
+        }
+        .onAppear {
+            isEditorFocused = true
         }
     }
 
@@ -155,6 +235,7 @@ struct MessageBubble: View {
 
     private var agentMessage: some View {
         MarkdownMessageView(content: message.content)
+            .contextMenu { messageMenuItems }
     }
 
     private var thinkingMessage: some View {
@@ -185,33 +266,52 @@ struct MessageBubble: View {
     @ViewBuilder
     private var deliveryStatus: some View {
         switch message.deliveryState {
-        case .sent:
+        // A transmitted message is in flight; the "Waiting for hosted agent…" bubble shows that.
+        case .sent, .transmitted:
             EmptyView()
         case .queued:
             Label("Queued", systemImage: "clock")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OOColor.inkSecondary)
         case .failed:
-            HStack(spacing: 8) {
-                Label("Failed", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                Button("Retry") {
-                    onRetry?()
+            VStack(alignment: .trailing, spacing: 2) {
+                HStack(spacing: 8) {
+                    Label("Not sent", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                    if let onRetry {
+                        Button("Retry", action: onRetry)
+                            .font(.caption2.weight(.semibold))
+                            .accessibilityLabel("Retry sending message")
+                    }
                 }
-                .font(.caption2.weight(.semibold))
-                .accessibilityLabel("Retry sending message")
+                if let failureReason {
+                    Text(failureReason)
+                        .font(.caption2)
+                        .foregroundStyle(OOColor.inkSecondary)
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .contextMenu {
+                if let failureDetails {
+                    Button {
+                        UIPasteboard.general.string = failureDetails
+                    } label: {
+                        Label("Copy error details", systemImage: "doc.on.doc")
+                    }
+                }
             }
         case .cancelled:
             HStack(spacing: 8) {
                 Label("Cancelled", systemImage: "stop.circle")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Button("Retry") {
-                    onRetry?()
+                    .foregroundStyle(OOColor.inkSecondary)
+                if let onRetry {
+                    Button("Retry", action: onRetry)
+                        .font(.caption2.weight(.semibold))
+                        .accessibilityLabel("Retry cancelled message")
                 }
-                .font(.caption2.weight(.semibold))
-                .accessibilityLabel("Retry cancelled message")
             }
         }
     }

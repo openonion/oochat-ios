@@ -20,17 +20,13 @@ extension ChatViewModel {
         isConnecting = true
         errorMessage = nil
 
-        let agent: SavedAgent
-        if let activeAgent, activeAgent.address == address {
-            agent = activeAgent
-        } else {
-            agent = agents.first { $0.address == address } ?? SavedAgent(address: address)
-        }
+        let agent = conversationState.agent(withAddress: address) ?? SavedAgent(address: address)
         var conversation = conversations(for: agent).first ?? Conversation(agentID: agent.id, agentAddress: address)
         recoveryCoordinator.setConnectionState(.reconnecting, forConversationID: conversation.id)
 
         do {
             let result = try await client.connect(agentAddress: address, conversation: conversation)
+            deliveryCoordinator.noteSessionModes(result.sessionModes, agentAddress: address)
             if let session = result.serverSession {
                 conversation.mode = HostedAgentSessionState.mode(from: session, fallback: conversation.mode)
                 conversation.serverSession = HostedAgentSessionState.applying(
@@ -41,7 +37,6 @@ extension ChatViewModel {
             }
             let savedAgent = upsertAgent(agent)
             ensureDefaultConversation(for: savedAgent, seed: conversation)
-            skillCoordinator.loadSkillsIfNeeded(for: savedAgent, isOffline: isOffline)
             recoveryCoordinator.setConnectionState(.connected, forConversationID: conversation.id)
             isConnecting = false
             return savedAgent
@@ -59,7 +54,9 @@ extension ChatViewModel {
         } else {
             recoveryCoordinator.setConnectionState(.disconnected, forConversationID: conversation.id)
         }
-        errorMessage = message
+        if !presentIncompatibility(error) {
+            errorMessage = message
+        }
         isConnecting = false
     }
 
@@ -72,39 +69,95 @@ extension ChatViewModel {
         recoveryCoordinator.retryConnectivity()
     }
 
+    /// Opens the active chat's socket so the agent's Control Center arrives (connect on open).
+    func connectActiveConversationOnOpen() {
+        recoveryCoordinator.connectOnOpen(conversationID: activeConversationID)
+    }
+
     func reconnect() async {
         errorMessage = nil
         await recoveryCoordinator.reconnectActiveConversation()
     }
 
-    func dismissError() {
-        errorMessage = nil
-        connectivityErrorMessage = nil
+    /// A Device Link replaced this device's key. The chats made under `previousAddress` become
+    /// Previous-Identity Conversations and lose their resume bookmarks, since the host won't resume
+    /// them for the new Address. Every agent connection signed in as the old Address, so all of them
+    /// close; the open chat reconnects only if it is a current one.
+    func adoptReplacedIdentity(previousAddress: String) async {
+        var loadError: Error?
+        do {
+            identity = try identityStore.loadOrCreateIdentity()
+        } catch {
+            // No current Address: every stamped chat stays locked rather than signing as an unknown one.
+            identity = nil
+            loadError = error
+        }
+        let bookmarks = HostedAgentBookmarkStore()
+        for conversation in conversationState.stampForReplace(previousAddress: previousAddress) {
+            bookmarks.remove(conversationID: conversation.id)
+            // A card or Control Center pane left open from before the link would act as the new Address.
+            cancelPendingInteractions(forConversationID: conversation.id)
+            forgetDashboard(forConversationID: conversation.id)
+        }
+        await client.disconnectAll()
+        await reconnect()
+        // The new Address owns its own Hosted History, so the chat list fills now, not at the next refresh.
+        await refreshHistory()
+        // After the reconnect, which clears the banner, so a failed reload stays visible.
+        if let loadError {
+            errorMessage = loadError.localizedDescription
+        }
     }
 
-    // Show a banner for a failed delivery or reconnect.
+    func dismissError() {
+        errorMessage = nil
+    }
+
+    /// -32010 gets its own screen instead of the red banner. Returns false for every other error.
+    @discardableResult
+    func presentIncompatibility(_ error: Error) -> Bool {
+        guard let value = (error as? HostedAgentClientError)?.incompatibility else {
+            return false
+        }
+        // Final: HostedAgentConnection.canResume(after:) refuses this error, so no reconnect follows.
+        incompatibility = value
+        errorMessage = nil
+        return true
+    }
+
+    func dismissIncompatibility() {
+        incompatibility = nil
+    }
+
+    /// A message didn't go through: the reason goes on that message, not in a banner.
+    func presentDeliveryError(_ error: Error, messageID: String, forConversationID conversationID: String) {
+        if activeConversationID == conversationID, presentIncompatibility(error) {
+            return
+        }
+        failureByMessageID[messageID] = HostedAgentClientError.chatFailure(for: error)
+    }
+
+    /// A reconnect failed. A lost connection shows in the chat header ("Can't connect · Retry",
+    /// ChatConnectionStatus), so only other problems get the banner, in plain words.
     func presentConnectionError(_ error: Error, forConversationID conversationID: String) {
         guard activeConversationID == conversationID else {
             return
         }
-        let message = error.localizedDescription
-        guard HostedAgentClientError.isConnectivityFailure(error) else {
-            errorMessage = message
+        if presentIncompatibility(error) {
             return
         }
-        guard !isOffline else {
+        guard !HostedAgentClientError.isConnectivityFailure(error) else {
             return
         }
-        errorMessage = message
-        // Remember connectivity errors so an offline transition can dismiss duplicates.
-        connectivityErrorMessage = message
+        let agentName = activeAgent?.name ?? "the agent"
+        errorMessage = HostedAgentClientError.chatFailure(for: error).sentence(agentName: agentName)
     }
 
-    /// Dismisses a connectivity error once the app has entered its offline state.
-    func retractConnectivityError() {
-        guard errorMessage != nil, errorMessage == connectivityErrorMessage else {
-            return
+    /// The plain reason a message wasn't sent, and the raw text for "Copy error details".
+    func failure(forMessageID messageID: String) -> (reason: String, details: String?)? {
+        guard let failure = failureByMessageID[messageID] else {
+            return nil
         }
-        errorMessage = nil
+        return (failure.sentence(agentName: activeAgent?.name ?? "the agent"), failure.details)
     }
 }

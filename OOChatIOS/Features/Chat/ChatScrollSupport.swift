@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 struct ChatScrollUpdate: Equatable {
@@ -19,6 +20,8 @@ struct ChatScrollUpdate: Equatable {
 
 enum ChatScrollMetrics {
     static let followThreshold: CGFloat = 80
+    /// Jump to latest only shows once you're this many screens up, not just past the follow point.
+    static let jumpToLatestScreens: CGFloat = 1.5
     static let keyboardFollowUpDelay: DispatchTimeInterval = .milliseconds(250)
 }
 
@@ -29,25 +32,10 @@ enum ChatReadableWidth {
     static let maximum: CGFloat = 720
 }
 
-struct ChatBottomAnchorPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-struct ChatViewportHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 enum ChatTimelineEntry: Identifiable, Equatable {
     case message(ChatMessage)
     case toolCallGroup([ChatMessage])
+    case workRoom(WorkRoom)
 
     var id: String {
         switch self {
@@ -55,12 +43,17 @@ enum ChatTimelineEntry: Identifiable, Equatable {
             return message.id
         case .toolCallGroup(let messages):
             return messages.first?.id ?? "toolCallGroup"
+        case .workRoom(let workRoom):
+            return "workRoom.\(workRoom.id)"
         }
     }
 }
 
 enum ChatTimelineBuilder {
-    static func entries(from messages: [ChatMessage]) -> [ChatTimelineEntry] {
+    /// A Provider Invocation replaces its outer tool_call: the Work Room Card takes the root's place
+    /// and the tool_call rows of the group are hidden.
+    @MainActor
+    static func entries(from messages: [ChatMessage], workRooms: WorkRoomStore? = nil) -> [ChatTimelineEntry] {
         var entries: [ChatTimelineEntry] = []
         var pendingToolCalls: [ChatMessage] = []
 
@@ -78,7 +71,12 @@ enum ChatTimelineBuilder {
         }
 
         for message in messages {
-            if message.role == .tool {
+            if message.role == .tool, let workRooms, workRooms.isProviderToolCall(message.id) {
+                if let workRoom = workRooms.workRoom(forToolCallID: message.id) {
+                    appendPendingToolCalls()
+                    entries.append(.workRoom(workRoom))
+                }
+            } else if message.role == .tool {
                 pendingToolCalls.append(message)
             } else {
                 appendPendingToolCalls()
