@@ -1,4 +1,6 @@
 import Combine
+import ConnectOnionKit
+import Foundation
 
 enum MessageEnqueueResult {
     case queued
@@ -14,11 +16,13 @@ final class MessageDeliveryCoordinator: ObservableObject {
     }
 
     @Published private var processingConversationIDs: Set<String> = []
-
+    @Published private(set) var availableModesByAgentAddress: [String: [OIPPermissionMode]] = [:]
     var onConnectionStateChange: ((String, ConversationConnectionState) -> Void)?
     var connectionState: ((String) -> ConversationConnectionState)?
     var onDeliveryError: ((String, Error) -> Void)?
     var onDeliveriesIdle: (() -> Void)?
+    // conversationID, the confirmed mode, and turns_left (full access only)
+    var onModeChanged: ((String, OIPPermissionMode, Int?) -> Void)?
 
     var hasActiveDeliveries: Bool {
         !deliveryTasksByConversationID.isEmpty
@@ -178,8 +182,10 @@ final class MessageDeliveryCoordinator: ObservableObject {
               !pausedConversationIDs.contains(conversationID),
               deliveryTasksByConversationID[conversationID] == nil,
               let conversation = conversationState.conversation(withID: conversationID),
+              // A .transmitted message comes first: it was sent before the app last closed and
+              // must be settled (never resent) before anything queued after it goes out.
               let message = conversation.messages.first(where: {
-                  $0.role == .user && $0.deliveryState == .queued
+                  $0.role == .user && ($0.deliveryState == .transmitted || $0.deliveryState == .queued)
               }) else {
             return false
         }
@@ -214,9 +220,8 @@ final class MessageDeliveryCoordinator: ObservableObject {
         }
 
         let transport = transport
-        let interactionCoordinator = interactionCoordinator
-        let conversationState = conversationState
-        return Task { [weak self, transport, interactionCoordinator, conversationState] in
+        let handlers = promptHandlers(messageID: messageID, conversationID: conversationID)
+        return Task { [weak self, transport] in
             defer {
                 self?.deliveryDidFinish(
                     messageID: messageID,
@@ -224,22 +229,7 @@ final class MessageDeliveryCoordinator: ObservableObject {
                 )
             }
             do {
-                let result = try await transport.sendPrompt(
-                    agentAddress: delivery.agent.address,
-                    conversation: delivery.conversation,
-                    prompt: Self.transportPrompt(for: delivery.message),
-                    onEvent: { [weak self] event in
-                        self?.apply(event, toConversationID: conversationID)
-                    },
-                    onInteraction: { [interactionCoordinator, conversationState] interaction in
-                        await Self.handleInteraction(
-                            interaction,
-                            conversationID: conversationID,
-                            coordinator: interactionCoordinator,
-                            conversationState: conversationState
-                        )
-                    }
-                )
+                let result = try await Self.deliver(delivery, over: transport, handlers: handlers)
                 try Task.checkCancellation()
                 self?.completeDelivery(
                     result,
@@ -256,6 +246,56 @@ final class MessageDeliveryCoordinator: ObservableObject {
                 )
             }
         }
+    }
+
+    // An earlier run of the app may already have sent a .transmitted message, so ask the host
+    // what happened to it instead of sending it again.
+    private static func deliver(
+        _ delivery: PreparedDelivery,
+        over transport: HostedAgentConversationTransport,
+        handlers: HostedAgentPromptHandlers
+    ) async throws -> HostedAgentResult {
+        let prompt = transportPrompt(for: delivery.message)
+        if delivery.message.deliveryState == .transmitted {
+            return try await transport.resumePrompt(
+                agentAddress: delivery.agent.address,
+                conversation: delivery.conversation,
+                prompt: prompt,
+                handlers: handlers
+            )
+        }
+        return try await transport.sendPrompt(
+            agentAddress: delivery.agent.address,
+            conversation: delivery.conversation,
+            prompt: prompt,
+            handlers: handlers
+        )
+    }
+
+    private func promptHandlers(messageID: String, conversationID: String) -> HostedAgentPromptHandlers {
+        let interactionCoordinator = interactionCoordinator
+        let conversationState = conversationState
+        return HostedAgentPromptHandlers(
+            onEvent: { [weak self] event in
+                // Provider frames feed the conversation's Work Room store, not its messages.
+                if case .providerFrame(let frame) = event {
+                    conversationState.workRoomStore(for: conversationID).receive(frame)
+                    return
+                }
+                self?.apply(event, toConversationID: conversationID)
+            },
+            onInteraction: { interaction in
+                await Self.handleInteraction(
+                    interaction,
+                    conversationID: conversationID,
+                    coordinator: interactionCoordinator,
+                    conversationState: conversationState
+                )
+            },
+            onInputDispatched: { [weak self] in
+                self?.markTransmitted(messageID: messageID, conversationID: conversationID)
+            }
+        )
     }
 
     private func prepareDelivery(
@@ -310,6 +350,19 @@ final class MessageDeliveryCoordinator: ObservableObject {
         }
     }
 
+    // Saved before the INPUT bytes leave. If the app dies before the reply, the relaunch sees
+    // .transmitted and settles the message with resumePrompt instead of sending it twice.
+    private func markTransmitted(messageID: String, conversationID: String) {
+        guard activeMessageIDsByConversationID[conversationID] == messageID,
+              var updated = conversationState.conversation(withID: conversationID),
+              let index = updated.messages.firstIndex(where: { $0.id == messageID }),
+              updated.messages[index].deliveryState == .queued else {
+            return
+        }
+        updated.messages[index].deliveryState = .transmitted
+        conversationState.upsert(updated, persistence: .message(id: messageID))
+    }
+
     private func completeDelivery(
         _ result: HostedAgentResult,
         messageID: String,
@@ -322,6 +375,7 @@ final class MessageDeliveryCoordinator: ObservableObject {
         if let index = updated.messages.firstIndex(where: { $0.id == messageID }) {
             updated.messages[index].deliveryState = .sent
         }
+        noteSessionModes(result.sessionModes, agentAddress: updated.agentAddress)
         if let session = result.serverSession {
             updated.mode = HostedAgentSessionState.mode(from: session, fallback: updated.mode)
             updated.serverSession = HostedAgentSessionState.applying(
@@ -370,7 +424,15 @@ final class MessageDeliveryCoordinator: ObservableObject {
         conversationState.upsert(updated)
     }
 
-    private func apply(_ event: HostedAgentEvent, toConversationID conversationID: String) {
+    func noteSessionModes(_ sessionModes: OIPSessionModes?, agentAddress: String) {
+        guard let sessionModes else {
+            return
+        }
+
+        availableModesByAgentAddress[agentAddress] = sessionModes.availableModes.map(\.id)
+    }
+
+    func apply(_ event: HostedAgentEvent, toConversationID conversationID: String) {
         guard var conversation = conversationState.conversation(withID: conversationID) else {
             return
         }
@@ -409,14 +471,17 @@ final class MessageDeliveryCoordinator: ObservableObject {
                 )
             }
             persistence = .message(id: id)
-        case .modeChanged(let mode):
-            conversation.mode = mode
+        case .modeChanged(let protocolMode, let turnsLeft):
+            conversation.mode = ChatMode(permissionMode: protocolMode)
             conversation.serverSession = HostedAgentSessionState.applying(
-                mode,
+                conversation.mode,
                 to: conversation.serverSession,
                 conversationID: conversationID
             )
+            onModeChanged?(conversationID, protocolMode, turnsLeft)
             persistence = .metadata
+        case .modeChangeFailed, .modeChangeTimedOut, .providerFrame:
+            return
         }
 
         conversationState.upsert(conversation, persistence: persistence)

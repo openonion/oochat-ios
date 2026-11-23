@@ -1,31 +1,101 @@
+import ConnectOnionKit
 import SwiftUI
+import UIKit
+
+/// tabs or beside control center viewing
+enum ChatControlCenter {
+
+    // next to chat, hidden or showing via toolbar
+    case beside(isOpen: Bool, toggle: () -> Void)
+
+    case tabs(dashboard: OIPDashboard, selection: Binding<OOAgentView>, attention: OOAgentView?)
+}
 
 struct ChatView: View {
     @ObservedObject var viewModel: ChatViewModel
     let showsComposer: Bool
     let showsSidebarButton: Bool
+    let controlCenter: ChatControlCenter?
+    /// Ids of the Work Rooms pushed onto this chat; the shell reads it to hide the Control Center.
+    @Binding var workRoomPath: [String]
+    let onAddAgent: () -> Void
     let onOpenSidebar: () -> Void
 
     init(
         viewModel: ChatViewModel,
         showsComposer: Bool = true,
         showsSidebarButton: Bool = true,
+        controlCenter: ChatControlCenter? = nil,
+        workRoomPath: Binding<[String]> = .constant([]),
+        onAddAgent: @escaping () -> Void = {},
         onOpenSidebar: @escaping () -> Void = {}
     ) {
         self.viewModel = viewModel
         self.showsComposer = showsComposer
         self.showsSidebarButton = showsSidebarButton
+        self.controlCenter = controlCenter
+        _workRoomPath = workRoomPath
+        self.onAddAgent = onAddAgent
         self.onOpenSidebar = onOpenSidebar
     }
 
+    /// The chat stays mounted under the Control tab, so VoiceOver must not read it there.
+    private var isControlTabShowing: Bool {
+        if case .tabs(_, let selection, _) = controlCenter {
+            return selection.wrappedValue == .control
+        }
+        return false
+    }
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $workRoomPath) {
             ChatScreen(
                 viewModel: viewModel,
                 showsComposer: showsComposer,
                 showsSidebarButton: showsSidebarButton,
-                onOpenSidebar: onOpenSidebar
+                onAddAgent: onAddAgent,
+                onOpenSidebar: onOpenSidebar,
+                onOpenWorkRoom: { workRoomPath.append($0) }
             )
+            // The Control tab and its switch below hang off this root screen, so a pushed Work Room has neither.
+            .navigationDestination(for: String.self) { workRoomID in
+                WorkRoomScreen(viewModel: viewModel, workRoomID: workRoomID)
+            }
+            .accessibilityHidden(isControlTabShowing)
+            .overlay {
+                if case .tabs(let dashboard, let selection, _) = controlCenter {
+                    // Mounted once and only shown or hidden, so the page keeps its state across tab switches.
+                    // After a skill button, back to Chat where its turn runs
+                    OOControlCenterPane(dashboard: dashboard, skills: viewModel.activeAgentSkills) { message in
+                        viewModel.runControlCenterSkill(message)
+                        selection.wrappedValue = .chat
+                    }
+                    .opacity(selection.wrappedValue == .control ? 1 : 0)
+                    .allowsHitTesting(selection.wrappedValue == .control)
+                    .accessibilityHidden(selection.wrappedValue != .control)
+                }
+            }
+            .onChange(of: isControlTabShowing) { _, isShowing in
+                if isShowing {
+                    UIApplication.shared.sendAction(
+                        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil
+                    )
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if case .tabs(_, let selection, let attention) = controlCenter {
+                    OOViewSwitch(selection: selection, attention: attention)
+                        .frame(maxWidth: .infinity)
+                        .background(OOColor.paper)
+                }
+            }
+            .toolbar {
+                if case .beside(let isOpen, let toggle) = controlCenter {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        OOControlCenterButton(isOpen: isOpen, action: toggle)
+                    }
+                }
+            }
         }
     }
 }
@@ -34,7 +104,9 @@ struct ChatScreen: View {
     @ObservedObject var viewModel: ChatViewModel
     let showsComposer: Bool
     var showsSidebarButton: Bool = true
+    var onAddAgent: () -> Void = {}
     let onOpenSidebar: () -> Void
+    let onOpenWorkRoom: (String) -> Void
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     @State var bottomAnchorY: CGFloat = 0
     @State var scrollViewportHeight: CGFloat = 0
@@ -46,6 +118,10 @@ struct ChatScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if showsComposer {
+                    balanceNotice
+                }
+
             if let conversation = viewModel.activeConversation {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -53,9 +129,17 @@ struct ChatScreen: View {
                             if shouldShowEmptyState(for: conversation) {
                                 EmptyChatState(
                                     agentName: viewModel.activeAgent?.name ?? "Your agent",
-                                    showsSuggestions: showsComposer
-                                ) { suggestion in
-                                    viewModel.prompt = suggestion.prompt
+                                    skills: StarterSkills.ordered(
+                                        viewModel.activeAgentSkills ?? [],
+                                        dashboard: viewModel.activeDashboard
+                                    ),
+                                    showsSkills: showsComposer
+                                ) { skill in
+                                    viewModel.prompt = "/\(skill.name) "
+                                    promptFocusRequest += 1
+                                } onShowAllSkills: {
+                                    // A lone "/" opens the composer's skill picker.
+                                    viewModel.prompt = "/"
                                     promptFocusRequest += 1
                                 }
                                 .frame(
@@ -208,12 +292,16 @@ struct ChatScreen: View {
                     }
                 }
             } else {
-                ContentUnavailableView("No Conversation", systemImage: "bubble.left")
+                noChatState
             }
         }
         .background {
             ChatScreenBackdrop()
                 .ignoresSafeArea()
+        }
+        // connect as soon as the chat is on screen for control center
+        .task(id: viewModel.activeConversationID) {
+            viewModel.connectActiveConversationOnOpen()
         }
         .navigationTitle(viewModel.activeConversation?.title ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
@@ -225,10 +313,11 @@ struct ChatScreen: View {
                         .lineLimit(1)
                         .contentTransition(.opacity)
 
-                    HStack {
-                        AgentPresencePill(isOnline: viewModel.isActiveAgentOnline)
+                    // No chat, nothing to connect: a status here would only read as a fault.
+                    if viewModel.activeConversation != nil {
+                        sessionStatus
+                            .contentTransition(.opacity)
                     }
-                    .contentTransition(.opacity)
                 }
                 .animation(
                     AppMotion.stateChange(reduceMotion: reduceMotion),
@@ -260,5 +349,138 @@ struct ChatScreen: View {
                 trailingBalanceItem
             }
         }
+    }
+
+    /// No chat open. With an agent, the next step is a chat with it; with none, adding one.
+    @ViewBuilder
+    private var noChatState: some View {
+        if let agent = viewModel.activeAgent ?? viewModel.agents.first {
+            ContentUnavailableView {
+                Label("No chat open", systemImage: "bubble.left")
+            } description: {
+                Text("Start a chat with \(agent.name), or pick one from the sidebar.")
+            } actions: {
+                Button {
+                    _ = viewModel.createConversation(for: agent)
+                } label: {
+                    Text("New chat with \(agent.name)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .buttonStyle(.ooPrimary)
+
+                Button("Add agent", action: onAddAgent)
+                    .buttonStyle(.ooSecondary)
+            }
+        } else {
+            ContentUnavailableView {
+                Label("Add your first agent", systemImage: "person.badge.plus")
+            } description: {
+                Text("An agent's address starts with 0x. Find it where the agent runs, or scan its QR code.")
+            } actions: {
+                Button("Add agent", action: onAddAgent)
+                    .buttonStyle(.ooPrimary)
+            }
+        }
+    }
+
+    private var sessionStatus: some View {
+        let text = viewModel.activeSessionStatusText
+        return ZStack {
+            // The longest label reserves the width, so the header doesn't resize when the status changes.
+            OOStatusDot(label: "Not Connected", isLive: false)
+                .hidden()
+
+            OOStatusDot(label: text, isLive: viewModel.isActiveSessionLive)
+                .id(text)
+                .transition(AppMotion.statusTransition(reduceMotion: reduceMotion))
+        }
+        .animation(AppMotion.stateChange(reduceMotion: reduceMotion), value: text)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Session status: \(text)")
+    }
+
+    @ViewBuilder
+    private var balanceNotice: some View {
+        if let profile = viewModel.activeAgentProfile,
+           let notice = AgentBalance.notice(for: profile.balanceUSD) {
+
+            let message = AgentBalance.message(for: notice)
+
+            let background = Color(
+                red: 42.0 / 255.0,
+                green: 32.0 / 255.0,
+                blue: 25.0 / 255.0
+            )
+
+            let border = Color(
+                red: 58.0 / 255.0,
+                green: 37.0 / 255.0,
+                blue: 29.0 / 255.0
+            )
+
+            let textColor = Color(
+                red: 253.0 / 255.0,
+                green: 142.0 / 255.0,
+                blue: 134.0 / 255.0
+            )
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    Text(message)
+                        .multilineTextAlignment(.center)
+
+                    addCreditsLink(color: textColor)
+                }
+
+                VStack(spacing: 4) {
+                    Text(message)
+                        .multilineTextAlignment(.center)
+
+                    addCreditsLink(color: textColor)
+                }
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(textColor)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(background)
+            .overlay(alignment: .top) {
+                border.frame(height: 1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func addCreditsLink(color: Color) -> some View {
+        if let address = viewModel.activeAgent?.address,
+           let url = AgentBalance.topUpURL(agentAddress: address) {
+            Link(destination: url) {
+                Text("Add credits")
+                    .fontWeight(.semibold)
+                    .underline()
+                    .foregroundStyle(color)
+            }
+            .frame(minHeight: 24)
+        }
+    }
+}
+
+/// Looks the Work Room up by id on every render, so the pushed screen follows live frames.
+private struct WorkRoomScreen: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let workRoomID: String
+
+    var body: some View {
+        Group {
+            if let conversationID = viewModel.activeConversationID,
+               let workRoom = viewModel.conversationState.workRoomStore(for: conversationID).workRoom(id: workRoomID) {
+                OOWorkRoomView(workRoom: workRoom)
+            }
+        }
+        // The heading is inside the Work Room, so the bar title stays short.
+        .navigationTitle("Work Room")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
