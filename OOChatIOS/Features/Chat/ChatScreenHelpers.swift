@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 extension ChatScreen {
@@ -76,7 +77,8 @@ extension ChatScreen {
         ChatTimelineBuilder.entries(
             from: conversation.messages.filter {
                 shouldShowMessage($0, in: conversation.id)
-            }
+            },
+            workRooms: viewModel.conversationState.workRoomStore(for: conversation.id)
         )
     }
 
@@ -84,11 +86,21 @@ extension ChatScreen {
     func timelineView(for entry: ChatTimelineEntry) -> some View {
         switch entry {
         case .message(let message):
-            MessageBubble(message: message) {
+            let failure = message.deliveryState == .failed ? viewModel.failure(forMessageID: message.id) : nil
+            MessageBubble(
+                message: message,
+                failureReason: failure?.reason,
+                failureDetails: failure?.details
+            ) {
                 viewModel.retryMessage(message)
             }
         case .toolCallGroup(let messages):
             ToolCallGroupView(messages: messages)
+        case .workRoom(let workRoom):
+            let store = viewModel.activeConversationID.map { viewModel.conversationState.workRoomStore(for: $0) }
+            OOWorkRoomCard(workRoom: workRoom, onOpen: {
+                onOpenWorkRoom(workRoom.id)
+            }, onDecide: { store?.decide($0, in: workRoom.id) })
         }
     }
 

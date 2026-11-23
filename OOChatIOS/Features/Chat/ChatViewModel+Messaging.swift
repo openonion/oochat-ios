@@ -2,6 +2,10 @@ import Foundation
 
 extension ChatViewModel {
     func sendPrompt() {
+        // A Station has no outer chat: the host refuses INPUT, so nothing is sent.
+        guard !(activeAgent.map(isStation) ?? false) else {
+            return
+        }
         stopVoiceInput()
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = pendingImages
@@ -21,10 +25,23 @@ extension ChatViewModel {
         }
     }
 
+    /// A Control Center button's `/skill args` line, already checked by the kit pane, goes out as a
+    /// normal, visible user message
+    func runControlCenterSkill(_ message: String) {
+        deliveryCoordinator.setDeliveryEnabled(!isOffline)
+        switch deliveryCoordinator.enqueuePrompt(message, images: [], files: []) {
+        case .queued:
+            errorMessage = nil
+        case .rejected(let reason):
+            errorMessage = reason
+        }
+    }
+
     func retryMessage(_ message: ChatMessage) {
         deliveryCoordinator.setDeliveryEnabled(!isOffline)
         if deliveryCoordinator.retryMessage(message) {
             errorMessage = nil
+            failureByMessageID[message.id] = nil
         }
     }
 
