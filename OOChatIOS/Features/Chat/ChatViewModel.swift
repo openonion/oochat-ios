@@ -1,4 +1,5 @@
 import Combine
+import ConnectOnionKit
 import Foundation
 import UIKit
 
@@ -14,7 +15,10 @@ final class ChatViewModel: ObservableObject {
     @Published var identity: StoredIdentity?
     @Published var isConnecting = false
     @Published var errorMessage: String?
+     /// Set when the agent answered -32010. The Incompatible screen shows while it is non-nil.
+    @Published var incompatibility: OIPHandshake.Incompatibility?
     @Published var agentAddressDraft = ""
+    @Published var dashboards: [String: OIPDashboard] = [:]
     @Published var prompt = "" {
         didSet {
             conversationState.updateActiveDraft(prompt)
@@ -372,6 +376,9 @@ final class ChatViewModel: ObservableObject {
 
     /// Connects coordinator updates after all stored properties are ready.
     private func observeCoordinators() {
+        client.onSessionUpdate = { [weak self] conversationID, update in
+            self?.apply(update, forConversationID: conversationID)
+        }
         recoveryCoordinator.onRecoveryError = { [weak self] conversationID, error in
             self?.presentConnectionError(error, forConversationID: conversationID)
         }
