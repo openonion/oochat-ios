@@ -1,5 +1,5 @@
-import CryptoKit
 import Foundation
+import ConnectOnionKit
 
 final class HostedAgentClient: HostedAgentTransport {
     private let connectionPool: HostedAgentConnectionPool
@@ -9,6 +9,26 @@ final class HostedAgentClient: HostedAgentTransport {
     var onConnectionStateChange: (@MainActor (String, ConversationConnectionState) -> Void)? {
         get { connectionStateObserver.handler }
         set { connectionStateObserver.handler = newValue }
+    }
+
+    var onAgentProfile: (@MainActor (String, OIPAgentProfile) -> Void)? {
+        get { connectionStateObserver.profileHandler }
+        set { connectionStateObserver.profileHandler = newValue }
+    }
+
+    var onSessionUpdate: (@MainActor (String, HostedAgentSessionUpdate) -> Void)? {
+        get { connectionStateObserver.updateHandler }
+        set { connectionStateObserver.updateHandler = newValue }
+    }
+
+    var onProviderUpdate: (@MainActor (String, HostedAgentProviderUpdate) -> Void)? {
+        get { connectionStateObserver.providerHandler }
+        set { connectionStateObserver.providerHandler = newValue }
+    }
+
+    var ownsApproval: (@MainActor (String, [String: JSONValue]) -> Bool)? {
+        get { connectionStateObserver.ownsApprovalHandler }
+        set { connectionStateObserver.ownsApprovalHandler = newValue }
     }
 
     init(
@@ -46,55 +66,6 @@ final class HostedAgentClient: HostedAgentTransport {
 
     static func isHostedAgentAddress(_ address: String) -> Bool {
         address.range(of: #"^0x[0-9a-fA-F]{64}$"#, options: .regularExpression) != nil
-    }
-
-    static func connectSignaturePayload(
-        agentAddress: String,
-        conversationID: String,
-        session: [String: JSONValue],
-        timestamp: Double
-    ) -> [String: JSONValue] {
-        [
-            "action": .string("session.connect"),
-            "to": .string(agentAddress),
-            "timestamp": .number(timestamp),
-            "session_id": .string(conversationID),
-            "session_sha256": .string(canonicalSHA256(.object(session))),
-        ]
-    }
-
-    static func inputSignaturePayload(
-        agentAddress: String,
-        conversationID: String,
-        inputID: String,
-        prompt: String,
-        mode: ChatMode,
-        timestamp: Double,
-        images: [String] = [],
-        files: [HostedAgentFilePayload] = []
-    ) -> [String: JSONValue] {
-        [
-            "action": .string("session.input"),
-            "to": .string(agentAddress),
-            "timestamp": .number(timestamp),
-            "session_id": .string(conversationID),
-            "input_id": .string(inputID),
-            "prompt": .string(prompt),
-            "mode": .string(mode.rawValue),
-            "attachments_sha256": .string(
-                canonicalSHA256(
-                    .object([
-                        "images": .array(images.map(JSONValue.string)),
-                        "files": .array(files.map(\.jsonValue)),
-                    ])
-                )
-            ),
-        ]
-    }
-
-    private static func canonicalSHA256(_ value: JSONValue) -> String {
-        let digest = SHA256.hash(data: Data(CanonicalJSON.string(from: value).utf8))
-        return Hex.encode(Data(digest))
     }
 
     func connect(agentAddress: String, conversation: Conversation) async throws -> HostedAgentResult {
@@ -137,8 +108,7 @@ final class HostedAgentClient: HostedAgentTransport {
         agentAddress: String,
         conversation: Conversation,
         prompt: HostedAgentPrompt,
-        onEvent: (@MainActor (HostedAgentEvent) -> Void)?,
-        onInteraction: (@MainActor (HostedAgentInteraction) async -> HostedAgentInteractionDecision)?
+        handlers: HostedAgentPromptHandlers
     ) async throws -> HostedAgentResult {
         guard Self.isHostedAgentAddress(agentAddress) else {
             throw HostedAgentClientError.invalidAddress
@@ -149,9 +119,49 @@ final class HostedAgentClient: HostedAgentTransport {
             prompt: prompt.text,
             images: prompt.images,
             files: prompt.files,
-            onEvent: onEvent,
-            onInteraction: onInteraction
+            onEvent: handlers.onEvent,
+            onInteraction: handlers.onInteraction,
+            onInputDispatched: handlers.onInputDispatched
         )
+    }
+
+    func resumePrompt(
+        agentAddress: String,
+        conversation: Conversation,
+        prompt: HostedAgentPrompt,
+        handlers: HostedAgentPromptHandlers
+    ) async throws -> HostedAgentResult {
+        guard Self.isHostedAgentAddress(agentAddress) else {
+            throw HostedAgentClientError.invalidAddress
+        }
+        return try await connectionPool.resumePrompt(
+            agentAddress: agentAddress,
+            conversation: conversation,
+            prompt: prompt.text,
+            onEvent: handlers.onEvent,
+            onInteraction: handlers.onInteraction
+        )
+    }
+
+    func requestModeChange(
+        agentAddress: String,
+        conversation: Conversation,
+        mode: OIPPermissionMode,
+        onEvent: @escaping @MainActor (HostedAgentEvent) -> Void
+    ) async throws {
+        guard Self.isHostedAgentAddress(agentAddress)
+        else {
+            throw HostedAgentClientError.invalidAddress
+        }
+        try await connectionPool.requestModeChange(
+            agentAddress: agentAddress,
+            conversation: conversation,
+            mode: mode,
+            onEvent: onEvent)
+    }
+
+    func submitOnboarding(agentAddress: String, conversationID: String, code: String) async throws {
+        try await connectionPool.submitOnboarding(agentAddress: agentAddress, conversationID: conversationID, code: code)
     }
 
     func waitForPendingInteractionResponses(agentAddress: String, conversationID: String) async {
@@ -159,6 +169,10 @@ final class HostedAgentClient: HostedAgentTransport {
             agentAddress: agentAddress,
             conversationID: conversationID
         )
+    }
+
+    func restartSession(agentAddress: String, conversationID: String) async {
+        await connectionPool.closeConnection(agentAddress: agentAddress, conversationID: conversationID)
     }
 
     func noteNetworkLost() async {
@@ -171,67 +185,4 @@ final class HostedAgentClient: HostedAgentTransport {
             await connectionPool.noteApplicationBecameActive()
         }
     }
-
-    static func approvalResponseFrame(
-        decision: ApprovalDecision,
-        agentAddress: String,
-        endpoint: ResolvedEndpoint
-    ) -> [String: JSONValue] {
-        let recipient = endpoint.kind == .relay ? agentAddress : nil
-        return decision.responseFrame(to: recipient)
-    }
-
-    static func ulwResponseFrame(
-        decision: UlwCheckpointDecision,
-        agentAddress: String,
-        endpoint: ResolvedEndpoint
-    ) -> [String: JSONValue] {
-        routedInteractiveFrame(
-            decision.responseFrame,
-            agentAddress: agentAddress,
-            endpoint: endpoint
-        )
-    }
-
-    static func planReviewResponseFrame(
-        decision: PlanReviewDecision,
-        request: PlanReviewRequest,
-        agentAddress: String,
-        endpoint: ResolvedEndpoint
-    ) -> [String: JSONValue] {
-        routedInteractiveFrame(
-            decision.responseFrame(for: request),
-            agentAddress: agentAddress,
-            endpoint: endpoint
-        )
-    }
-
-    static func askUserResponseFrame(
-        answer: String,
-        agentAddress: String,
-        endpoint: ResolvedEndpoint
-    ) -> [String: JSONValue] {
-        routedInteractiveFrame(
-            [
-                "type": .string("ASK_USER_RESPONSE"),
-                "answer": .string(answer),
-            ],
-            agentAddress: agentAddress,
-            endpoint: endpoint
-        )
-    }
-
-    private static func routedInteractiveFrame(
-        _ frame: [String: JSONValue],
-        agentAddress: String,
-        endpoint: ResolvedEndpoint
-    ) -> [String: JSONValue] {
-        guard endpoint.kind == .relay else {
-            return frame
-        }
-        var routed = frame
-        routed["to"] = .string(agentAddress)
-        return routed
-    }
-
 }

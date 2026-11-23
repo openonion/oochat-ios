@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 enum HostedAgentClientError: LocalizedError {
@@ -8,6 +9,12 @@ enum HostedAgentClientError: LocalizedError {
     case closed
     case timeout
     case busy
+    /// The agent asked for an invite code first, so a message cannot be sent yet.
+    case onboardingRequired
+    /// A message sent before the app closed has no recorded result on the host.
+    case outcomeUnknown
+
+    case incompatibleProtocol(OIPHandshake.Incompatibility)
 
     var errorDescription: String? {
         switch self {
@@ -28,7 +35,45 @@ enum HostedAgentClientError: LocalizedError {
             return "The agent didn't reply in time. Try again."
         case .busy:
             return "The agent is still working on your previous message in this conversation. Wait for it to finish, then try again."
+        case .onboardingRequired:
+            return "This agent needs an invite code before you can chat. Enter it first."
+        case.incompatibleProtocol(let incompatibility):
+            return incompatibility.message
+        case .outcomeUnknown:
+            return "The app closed before the agent replied, and the agent has no reply to this message. "
+                + "It may or may not have run, so check before you retry."
         }
+    }
+
+    /// Why a message didn't go through, in the words both apps share.
+    var chatFailure: ChatFailure {
+        switch self {
+        case .server(let message):
+            return .server(message)
+        case .closed:
+            return .connectionClosed
+        case .timeout:
+            return .timedOut
+        case .busy:
+            return .busy
+        case .outcomeUnknown:
+            return .outcomeUnknown
+        // These carry their own plain sentence (onboardingRequired: "needs an invite code…").
+        case .invalidAddress, .invalidURL, .badFrame, .incompatibleProtocol, .onboardingRequired:
+            return .other(errorDescription ?? "")
+        }
+    }
+
+    static func chatFailure(for error: Error) -> ChatFailure {
+        (error as? HostedAgentClientError)?.chatFailure ?? .other(error.localizedDescription)
+    }
+
+    // Set only for -32010. The view model shows the Incompatible screen when it is non-nil.
+    var incompatibility: OIPHandshake.Incompatibility? {
+        if case .incompatibleProtocol(let value) = self {
+            return value
+        }
+        return nil
     }
 
     static func isConnectivityFailure(_ error: Error) -> Bool {
@@ -38,7 +83,7 @@ enum HostedAgentClientError: LocalizedError {
         switch clientError {
         case .closed, .timeout, .invalidURL:
             return true
-        case .invalidAddress, .badFrame, .server, .busy:
+        case .invalidAddress, .badFrame, .server, .busy, .onboardingRequired, .incompatibleProtocol, .outcomeUnknown:
             return false
         }
     }

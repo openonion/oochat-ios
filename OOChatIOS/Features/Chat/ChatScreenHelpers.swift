@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 extension ChatScreen {
@@ -68,15 +69,21 @@ extension ChatScreen {
         return "pendingAskUser"
     }
 
-    func shouldShowMessage(_ message: ChatMessage, in conversationID: String) -> Bool {
-        !viewModel.isToolCallCoveredByPendingApproval(message, in: conversationID)
-    }
-
+    // The tool the approval card asks about stays in the timeline, marked Awaiting approval:
+    // the card is where you decide, the row is the record of what's happening.
     func timelineEntries(for conversation: Conversation) -> [ChatTimelineEntry] {
         ChatTimelineBuilder.entries(
-            from: conversation.messages.filter {
-                shouldShowMessage($0, in: conversation.id)
-            }
+            from: conversation.messages,
+            workRooms: viewModel.conversationState.workRoomStore(for: conversation.id)
+        )
+    }
+
+    func messageMenu(for message: ChatMessage) -> MessageMenu {
+        MessageMenu(
+            canEdit: viewModel.canEdit(message),
+            canRetry: viewModel.canRetry(message),
+            onEdit: { viewModel.editLatestMessage(to: $0) },
+            onRetry: { viewModel.retryLatestReply() }
         )
     }
 
@@ -84,11 +91,22 @@ extension ChatScreen {
     func timelineView(for entry: ChatTimelineEntry) -> some View {
         switch entry {
         case .message(let message):
-            MessageBubble(message: message) {
+            let failure = message.deliveryState == .failed ? viewModel.failure(forMessageID: message.id) : nil
+            MessageBubble(
+                message: message,
+                menu: messageMenu(for: message),
+                failureReason: failure?.reason,
+                failureDetails: failure?.details
+            ) {
                 viewModel.retryMessage(message)
             }
         case .toolCallGroup(let messages):
             ToolCallGroupView(messages: messages)
+        case .workRoom(let workRoom):
+            let store = viewModel.activeConversationID.map { viewModel.conversationState.workRoomStore(for: $0) }
+            OOWorkRoomCard(workRoom: workRoom, onOpen: {
+                onOpenWorkRoom(workRoom.id)
+            }, onDecide: { store?.decide($0, in: workRoom.id) })
         }
     }
 
@@ -110,6 +128,45 @@ extension ChatScreen {
         }
         shouldFollowLatest = bottomAnchorY - scrollViewportHeight
             <= ChatScrollMetrics.followThreshold
+        if shouldFollowLatest {
+            hasUnseenLatest = false
+        }
+    }
+
+    /// About 1.5 screens above the newest message, measured in the chat's own height.
+    var isFarFromLatest: Bool {
+        scrollViewportHeight > 0
+            && bottomAnchorY - scrollViewportHeight
+                > scrollViewportHeight * ChatScrollMetrics.jumpToLatestScreens
+    }
+
+    /// Shown while you're scrolled up; brings you back to the newest message.
+    @ViewBuilder
+    func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
+        if isFarFromLatest {
+            Button {
+                scrollToBottom(proxy)
+            } label: {
+                Image(systemName: "arrow.down")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(OOColor.ink)
+                    .frame(width: ooMinimumTarget, height: ooMinimumTarget)
+                    .background(OOColor.paper, in: Circle())
+                    .overlay(Circle().stroke(OOColor.hairline, lineWidth: 1))
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+                    .overlay(alignment: .topTrailing) {
+                        if hasUnseenLatest {
+                            Circle()
+                                .fill(OOColor.primary)
+                                .frame(width: 10, height: 10)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(hasUnseenLatest ? "Jump to latest, new messages" : "Jump to latest")
+            .padding(.bottom, 24)
+            .transition(reduceMotion ? .opacity : .scale(scale: 0.8).combined(with: .opacity))
+        }
     }
 
     func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {

@@ -1,3 +1,6 @@
+import ConnectOnionKit
+import Foundation
+import XCTest
 @testable import OOChatIOS
 
 actor PromptGate {
@@ -52,8 +55,27 @@ final class MockAgentTransport: HostedAgentTransport {
     var connectBehavior: Behavior = .succeed(output: "")
     var sendBehavior: Behavior = .succeed(output: "mock reply")
     var onConnectionStateChange: (@MainActor (String, ConversationConnectionState) -> Void)?
+
+    var onAgentProfile: (@MainActor (String, OIPAgentProfile) -> Void)?
+
+    @MainActor
+    func simulateAgentProfile(_ profile: OIPAgentProfile) {
+        guard let address = profile.address else {
+            XCTFail("Test profile must contain an agent address")
+            return
+        }
+
+        onAgentProfile?(address, profile)
+    }
+
+    var onSessionUpdate: (@MainActor (String, HostedAgentSessionUpdate) -> Void)?
+    var onProviderUpdate: (@MainActor (String, HostedAgentProviderUpdate) -> Void)?
+    private(set) var submittedOnboardingCodes: [String] = []
     var sendBehaviorsByPrompt: [String: Behavior] = [:]
     var streamedEvents: [HostedAgentEvent] = []
+    // Sent as soon as the INPUT goes out, before any approval: the real host announces a tool
+    // call, then asks permission to run it.
+    var eventsBeforeInteractions: [HostedAgentEvent] = []
     var approvalRequests: [ToolApprovalRequest] = []
     var ulwCheckpoints: [UlwCheckpointRequest] = []
     var planReviews: [PlanReviewRequest] = []
@@ -66,10 +88,18 @@ final class MockAgentTransport: HostedAgentTransport {
     var skillFetchError: Error?
     var onSend: (@MainActor () -> Void)?
     var waitAfterInteractionsUntilCancelled = false
+    // What the host says about a prompt sent before a relaunch. Fails by default, so a test
+    // that never expects a resume notices one.
+    var resumeBehavior: Behavior = .fail(HostedAgentClientError.outcomeUnknown)
+    // How the host answers a mode_change. nil confirms the requested mode.
+    var modeChangeReply: HostedAgentEvent?
+    var modeChangeError: Error?
+    var connectSessionModes: OIPSessionModes?
 
     private(set) var networkLossNotices = 0
     private(set) var connectedAddresses: [String] = []
     private(set) var sentPrompts: [String] = []
+    private(set) var resumedPrompts: [String] = []
     private(set) var sentImages: [[String]] = []
     private(set) var sentFiles: [[HostedAgentFilePayload]] = []
     private(set) var approvalDecisions: [ApprovalDecision] = []
@@ -80,6 +110,14 @@ final class MockAgentTransport: HostedAgentTransport {
     private(set) var fetchedNameAddresses: [String] = []
     private(set) var checkedAvailabilityAddresses: [String] = []
     private(set) var interactionResponseWaits: [(agentAddress: String, conversationID: String)] = []
+    private(set) var requestedModes: [OIPPermissionMode] = []
+    // Each restart, with how many prompts had been sent before it.
+    private(set) var restartedSessions: [(conversationID: String, promptsSentBefore: Int)] = []
+    private(set) var sentConversations: [Conversation] = []
+
+    func restartSession(agentAddress: String, conversationID: String) async {
+        restartedSessions.append((conversationID, sentPrompts.count))
+    }
 
     func connect(agentAddress: String, conversation: Conversation) async throws -> HostedAgentResult {
         connectedAddresses.append(agentAddress)
@@ -88,7 +126,8 @@ final class MockAgentTransport: HostedAgentTransport {
             return HostedAgentResult(
                 output: nil,
                 endpointLabel: "mock",
-                serverSession: ["session_id": .string(conversation.id)]
+                serverSession: ["session_id": .string(conversation.id)],
+                sessionModes: connectSessionModes
             )
         case .fail(let error):
             throw error
@@ -97,7 +136,8 @@ final class MockAgentTransport: HostedAgentTransport {
             return HostedAgentResult(
                 output: nil,
                 endpointLabel: "mock",
-                serverSession: ["session_id": .string(conversation.id)]
+                serverSession: ["session_id": .string(conversation.id)],
+                sessionModes: connectSessionModes
             )
         case .waitThenFail(let gate, let error):
             await gate.wait()
@@ -131,24 +171,45 @@ final class MockAgentTransport: HostedAgentTransport {
         agentAddress: String,
         conversation: Conversation,
         prompt: HostedAgentPrompt,
-        onEvent: (@MainActor (HostedAgentEvent) -> Void)?,
-        onInteraction: (@MainActor (HostedAgentInteraction) async -> HostedAgentInteractionDecision)?
+        handlers: HostedAgentPromptHandlers
     ) async throws -> HostedAgentResult {
         sentPrompts.append(prompt.text)
+        sentConversations.append(conversation)
         sentImages.append(prompt.images)
         sentFiles.append(prompt.files)
+        // The real connection reports the dispatch before the INPUT leaves.
+        if let onInputDispatched = handlers.onInputDispatched {
+            await onInputDispatched()
+        }
+        for event in eventsBeforeInteractions {
+            await handlers.onEvent?(event)
+        }
         let output = try await output(for: sendBehaviorsByPrompt[prompt.text] ?? sendBehavior)
-        try await replayInteractions(onInteraction: onInteraction)
+        try await replayInteractions(onInteraction: handlers.onInteraction)
         if waitAfterInteractionsUntilCancelled {
             while true {
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
         }
         for event in streamedEvents {
-            await onEvent?(event)
+            await handlers.onEvent?(event)
         }
         if let onSend {
             await MainActor.run { onSend() }
+        }
+        return HostedAgentResult(output: output, endpointLabel: "mock", serverSession: nil)
+    }
+
+    func resumePrompt(
+        agentAddress: String,
+        conversation: Conversation,
+        prompt: HostedAgentPrompt,
+        handlers: HostedAgentPromptHandlers
+    ) async throws -> HostedAgentResult {
+        resumedPrompts.append(prompt.text)
+        let output = try await output(for: resumeBehavior)
+        for event in streamedEvents {
+            await handlers.onEvent?(event)
         }
         return HostedAgentResult(output: output, endpointLabel: "mock", serverSession: nil)
     }
@@ -210,6 +271,23 @@ final class MockAgentTransport: HostedAgentTransport {
         networkLossNotices += 1
     }
 
+    func requestModeChange(
+        agentAddress: String,
+        conversation: Conversation,
+        mode: OIPPermissionMode,
+        onEvent: @escaping @MainActor (HostedAgentEvent) -> Void
+    ) async throws {
+        requestedModes.append(mode)
+        if let modeChangeError {
+            throw modeChangeError
+        }
+        await onEvent(modeChangeReply ?? .modeChanged(mode: mode, turnsLeft: nil))
+    }
+
+    func submitOnboarding(agentAddress: String, conversationID: String, code: String) async throws {
+        submittedOnboardingCodes.append(code)
+    }
+
     func waitForPendingInteractionResponses(agentAddress: String, conversationID: String) async {
         interactionResponseWaits.append((agentAddress, conversationID))
         for _ in 0..<100 where approvalDecisions.isEmpty
@@ -232,5 +310,290 @@ final class MockAgentTransport: HostedAgentTransport {
     @MainActor
     func simulateConnectionState(_ state: ConversationConnectionState, conversationID: String) {
         onConnectionStateChange?(conversationID, state)
+    }
+
+    @MainActor
+    func simulateDashboard(_ html: String, conversationID: String) {
+        onSessionUpdate?(conversationID, .dashboard(OIPDashboard(html: html)))
+    }
+}
+
+// Socket-level test doubles for HostedAgentConnection and HostedAgentConnectionPool tests.
+// Moved out of HostedAgentConnectionTests.swift to keep that file under the file_length limit.
+
+enum HostedAgentTestError: Error {
+    case failed
+    case cancelled
+    case timedOut
+}
+
+final class MockHostedAgentWebSocket: HostedAgentWebSocketTask, @unchecked Sendable {
+    typealias Message = URLSessionWebSocketTask.Message
+
+    private let lock = NSLock()
+    private var queuedReceives: [Result<Message, Error>] = []
+    private var receiveContinuation: CheckedContinuation<Message, Error>?
+    private var storedSentMessages: [Message] = []
+    private var storedNextSendError: Error?
+    private var storedRecordsFailedSend = false
+    private var storedIsResumed = false
+    private var storedCloseCode: URLSessionWebSocketTask.CloseCode?
+
+    var isResumed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedIsResumed
+    }
+
+    var closeCode: URLSessionWebSocketTask.CloseCode? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCloseCode
+    }
+
+    func resume() {
+        lock.lock()
+        storedIsResumed = true
+        lock.unlock()
+    }
+
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        let continuation: CheckedContinuation<Message, Error>?
+        lock.lock()
+        storedCloseCode = closeCode
+        continuation = receiveContinuation
+        receiveContinuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: HostedAgentTestError.cancelled)
+    }
+
+    func send(_ message: Message) async throws {
+        if let error = recordSend(message) {
+            throw error
+        }
+    }
+
+    private func recordSend(_ message: Message) -> Error? {
+        lock.lock()
+        if let error = storedNextSendError {
+            storedNextSendError = nil
+            if storedRecordsFailedSend {
+                storedRecordsFailedSend = false
+                storedSentMessages.append(message)
+            }
+            lock.unlock()
+            return error
+        }
+        storedSentMessages.append(message)
+        lock.unlock()
+        return nil
+    }
+
+    func receive() async throws -> Message {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let result = queuedReceives.first {
+                queuedReceives.removeFirst()
+                lock.unlock()
+                continuation.resume(with: result)
+                return
+            }
+            if storedCloseCode != nil {
+                lock.unlock()
+                continuation.resume(throwing: HostedAgentTestError.cancelled)
+                return
+            }
+            receiveContinuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func failNextSend(with error: Error = HostedAgentTestError.failed, afterRecording: Bool = false) {
+        lock.lock()
+        storedNextSendError = error
+        storedRecordsFailedSend = afterRecording
+        lock.unlock()
+    }
+
+    func enqueueFrame(_ frame: [String: JSONValue], asData: Bool = false) throws {
+        let data = try JSONEncoder().encode(frame)
+        let message: Message
+        if asData {
+            message = .data(data)
+        } else {
+            message = .string(try XCTUnwrap(String(data: data, encoding: .utf8)))
+        }
+        enqueue(.success(message))
+    }
+
+    func enqueueText(_ text: String) {
+        enqueue(.success(.string(text)))
+    }
+
+    func enqueueError(_ error: Error = HostedAgentTestError.failed) {
+        enqueue(.failure(error))
+    }
+
+    func sentFrames() throws -> [[String: JSONValue]] {
+        let messages: [Message]
+        lock.lock()
+        messages = storedSentMessages
+        lock.unlock()
+
+        return try messages.map { message in
+            let data: Data
+            switch message {
+            case .string(let text):
+                data = try XCTUnwrap(text.data(using: .utf8))
+            case .data(let value):
+                data = value
+            @unknown default:
+                throw HostedAgentTestError.failed
+            }
+            return try JSONDecoder().decode([String: JSONValue].self, from: data)
+        }
+    }
+
+    func waitForSentFrame(
+        type: String,
+        occurrence: Int = 1,
+        timeout: TimeInterval = 1
+    ) async throws -> [String: JSONValue] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let matching = try sentFrames().filter { $0["type"]?.stringValue == type }
+            if matching.count >= occurrence {
+                return matching[occurrence - 1]
+            }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        throw HostedAgentTestError.timedOut
+    }
+
+    private func enqueue(_ result: Result<Message, Error>) {
+        let continuation: CheckedContinuation<Message, Error>?
+        lock.lock()
+        continuation = receiveContinuation
+        receiveContinuation = nil
+        if continuation == nil {
+            queuedReceives.append(result)
+        }
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
+final class MockHostedAgentSocketFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private let configureSocket: @Sendable (MockHostedAgentWebSocket) -> Void
+    private var storedSockets: [MockHostedAgentWebSocket] = []
+    private var storedURLs: [URL] = []
+
+    init(configureSocket: @escaping @Sendable (MockHostedAgentWebSocket) -> Void = { _ in }) {
+        self.configureSocket = configureSocket
+    }
+
+    var factory: HostedAgentWebSocketFactory {
+        { [weak self] url in
+            guard let self else {
+                return MockHostedAgentWebSocket()
+            }
+            let socket = MockHostedAgentWebSocket()
+            self.configureSocket(socket)
+            self.lock.lock()
+            self.storedURLs.append(url)
+            self.storedSockets.append(socket)
+            self.lock.unlock()
+            return socket
+        }
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedSockets.count
+    }
+
+    func url(at index: Int) -> URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedURLs.indices.contains(index) ? storedURLs[index] : nil
+    }
+
+    func socket(at index: Int, timeout: TimeInterval = 1) async throws -> MockHostedAgentWebSocket {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let socket = storedSocket(at: index)
+            if let socket {
+                return socket
+            }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        throw HostedAgentTestError.timedOut
+    }
+
+    private func storedSocket(at index: Int) -> MockHostedAgentWebSocket? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedSockets.indices.contains(index) ? storedSockets[index] : nil
+    }
+}
+
+final class MutableHostedAgentClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+
+    init(date: Date = Date(timeIntervalSince1970: 1_000)) {
+        self.date = date
+    }
+
+    func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return date
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock()
+        date = date.addingTimeInterval(interval)
+        lock.unlock()
+    }
+}
+
+actor EndpointSequence {
+    private var queue: [ResolvedEndpoint]
+
+    init(_ endpoints: [ResolvedEndpoint]) {
+        queue = endpoints
+    }
+
+    func next() -> ResolvedEndpoint {
+        queue.count > 1 ? queue.removeFirst() : queue[0]
+    }
+}
+
+extension ChatViewModel {
+    // setMode asks the host from a Task. Lets that Task reach its answer.
+    func settleModeChange() async {
+        for _ in 0..<100 where activePendingMode != nil {
+            await Task.yield()
+        }
+    }
+}
+
+// The kit's shared OIP fixtures, read from the source tree (they live in the kit's test bundle).
+enum KitFixtures {
+    static func frame(_ name: String, folder: String = "frames") throws -> [String: JSONValue] {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../Packages/ConnectOnionKit/Tests/ConnectOnionKitTests/Fixtures/\(folder)/\(name).json")
+        return try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: url))
+    }
+
+    static func sessionModes(_ name: String, folder: String = "frames") throws -> OIPSessionModes? {
+        guard case .connected(let connected) = OIPServerFrame.decode(try frame(name, folder: folder)) else {
+            return nil
+        }
+        return connected.sessionModes
     }
 }

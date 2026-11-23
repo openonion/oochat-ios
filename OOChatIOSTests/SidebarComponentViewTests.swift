@@ -4,12 +4,12 @@ import XCTest
 
 @MainActor
 final class AgentPresencePillTests: XCTestCase {
-    func testOnlineAndOfflineLabelsDescribeAgentPresence() {
-        let onlineWindow = ViewHost.host(AgentPresencePill(isOnline: true).padding())
-        let offlineWindow = ViewHost.host(AgentPresencePill(isOnline: false).padding())
+    func testPillSpeaksTheSessionStatus() {
+        let runningWindow = ViewHost.host(AgentPresencePill(label: "Running", isLive: true).padding())
+        let reconnectingWindow = ViewHost.host(AgentPresencePill(label: "Reconnecting", isLive: false).padding())
 
-        XCTAssertNotNil(ViewHost.element(labelContains: "Agent status: Online", in: onlineWindow))
-        XCTAssertNotNil(ViewHost.element(labelContains: "Agent status: Offline", in: offlineWindow))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Session status: Running", in: runningWindow))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Session status: Reconnecting", in: reconnectingWindow))
     }
 }
 
@@ -78,6 +78,26 @@ final class SidebarRowViewTests: XCTestCase {
         XCTAssertTrue(toggled)
         XCTAssertTrue(ViewHost.activateButton(labelContains: "Add Chat", in: window))
         XCTAssertEqual(addChatCount, 1)
+    }
+
+    func testStationAgentRowShowsTheStationCaption() {
+        let window = ViewHost.host(
+            SidebarAgentRow(
+                agent: ViewFixtures.agent(name: "Orbit Agent"),
+                isExpanded: false,
+                isOnline: true,
+                onToggle: {},
+                onRename: {},
+                onEdit: {},
+                onAddChat: {},
+                onShowQRCode: { _ in },
+                onDelete: {},
+                isStation: true
+            )
+            .padding()
+        )
+
+        XCTAssertNotNil(ViewHost.element(labelContains: "Station", in: window))
     }
 
     func testAgentRowCompactsDefaultAddressNameForDisplay() {
