@@ -1,8 +1,23 @@
+import Foundation
+import ConnectOnionKit
+
 extension ChatViewModel {
     func upsertAgent(_ agent: SavedAgent) -> SavedAgent {
         let next = conversationState.upsertAgent(agent)
         agentAddressDraft = next.address
         return next
+    }
+
+    /// Giving Device: every agent, by its lower-cased Address, with its Agent Name.
+    var linkAgentNames: [DeviceLinkAgentName] {
+        agents.compactMap { DeviceLinkAgentName(address: $0.address, name: $0.name) }
+    }
+
+    /// Receiving Device: called by the link after the key is replaced and before `adoptReplacedIdentity`,
+    /// whose History Restore then fills the added agents. Throws a failed save for the link to log.
+    func applyLinkedAgentNames(_ list: [DeviceLinkAgentName]) throws {
+        defer { presenceCoordinator.agentsDidChange() }
+        try conversationState.applyAgentNames(list)
     }
 
     func ensureDefaultConversation(for agent: SavedAgent, seed: Conversation) {
@@ -44,5 +59,71 @@ extension ChatViewModel {
 
     private func conversationBelongsToAgent(_ conversation: Conversation, _ agent: SavedAgent) -> Bool {
         conversationState.conversationBelongsToAgent(conversation, agent)
+    }
+
+    func apply(_ update: HostedAgentSessionUpdate, forConversationID conversationID: String) {
+        switch update {
+        case .hostStatus(let status):
+            hostStatuses[conversationID] = status
+        case .dashboard(let dashboard):
+            guard dashboards[conversationID] != dashboard else {
+                return
+            }
+            dashboards[conversationID] = dashboard
+        case .modeChanged(let mode, let turnsLeft):
+            deliveryCoordinator.apply(.modeChanged(mode: mode, turnsLeft: turnsLeft), toConversationID: conversationID)
+        case .mirroredTurn(let prompt):
+            deliveryCoordinator.beginMirroredTurn(prompt: prompt, conversationID: conversationID)
+        case .caughtUp(let items):
+            deliveryCoordinator.catchUp(toHostItems: items, conversationID: conversationID)
+        case .onboarding(let onboarding):
+            applyOnboarding(onboarding, forConversationID: conversationID)
+        }
+    }
+
+    var activeDashboard: OIPDashboard? {
+        activeConversationID.flatMap { dashboards[$0] }
+    }
+
+    /// The chat header's status. `connectingFor` is measured by the header,
+    /// so "Connecting…" can turn into "Can't connect" after 10 seconds.
+    func activeConnectionStatus(connectingFor: TimeInterval = 0) -> ChatConnectionStatus {
+        ChatConnectionStatus(state: activeSessionState, hostStatus: activeHostStatus, connectingFor: connectingFor)
+    }
+
+    var isActiveChatConnecting: Bool {
+        if case .connecting = activeSessionState {
+            return true
+        }
+        return false
+    }
+
+    private var activeHostStatus: String? {
+        activeConversationID.flatMap { hostStatuses[$0] }
+    }
+
+    // iOS socket states from kit
+    private var activeSessionState: SessionState {
+        switch connectionState {
+        case .connected:
+            return SessionStatusLabel.event(for: activeHostStatus ?? "").map { reduce(.connected, $0) } ?? .connected
+        case .reconnecting:
+            // retry
+            return .connecting(attempt: activeHostStatus == nil ? 0 : 1)
+        case .disconnected:
+            return isOffline ? .failed(.offline) : .idle
+        }
+    }
+
+    /// chat contains something the run needs
+    var activeChatAwaitsReader: Bool {
+        activePendingApproval != nil
+            || activePendingAskUser != nil
+            || activePendingPlanReview != nil
+            || activePendingUlwCheckpoint != nil
+    }
+
+    func forgetDashboard(forConversationID conversationID: String) {
+        dashboards[conversationID] = nil
     }
 }

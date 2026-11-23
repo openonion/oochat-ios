@@ -1,4 +1,5 @@
 import Combine
+import ConnectOnionKit
 import XCTest
 @testable import OOChatIOS
 
@@ -32,9 +33,33 @@ final class AgentFormViewTests: XCTestCase {
             } onCancel: {}
         )
 
-        XCTAssertTrue(ViewHost.activateButton(labelContains: "Save", in: window))
-        ViewHost.pump(0.3)
+        XCTAssertNotNil(ViewHost.waitForElement(labelContains: "That doesn't look like an agent address", in: window))
+        _ = ViewHost.activateButton(label: "Add", in: window)
         XCTAssertFalse(didAttemptSave)
+    }
+
+    func testAHalfTypedAddressIsStillFine() {
+        XCTAssertTrue(AgentAddressInput.couldBecomeValid("0"))
+        XCTAssertTrue(AgentAddressInput.couldBecomeValid("0x"))
+        XCTAssertTrue(AgentAddressInput.couldBecomeValid("0xAb12"))
+        XCTAssertTrue(AgentAddressInput.couldBecomeValid(hostedAddress))
+        XCTAssertFalse(AgentAddressInput.couldBecomeValid("agent"))
+        XCTAssertFalse(AgentAddressInput.couldBecomeValid("0xzz"))
+        XCTAssertFalse(AgentAddressInput.couldBecomeValid(hostedAddress + "a"))
+    }
+
+    func testAValidAddressFillsInTheAgentsName() {
+        var savedDraft: AgentFormDraft?
+        let window = ViewHost.host(
+            AgentFormView(draft: makeDraft(address: hostedAddress)) { draft in
+                savedDraft = draft
+                return true
+            } onCancel: {} fetchAgentName: { _ in "Looked Up" }
+        )
+
+        ViewHost.pump(0.5)
+        XCTAssertTrue(ViewHost.activateButton(label: "Add", in: window))
+        XCTAssertEqual(savedDraft?.name, "Looked Up")
     }
 
     func testSaveFailureKeepsFormOpenAfterSaveAttempt() {
@@ -46,7 +71,7 @@ final class AgentFormViewTests: XCTestCase {
             } onCancel: {}
         )
 
-        XCTAssertTrue(ViewHost.activateButton(labelContains: "Save", in: window))
+        XCTAssertTrue(ViewHost.activateButton(label: "Add", in: window))
         ViewHost.pump(0.3)
         XCTAssertEqual(saveAttemptCount, 1)
         XCTAssertNotNil(ViewHost.element(labelContains: "Add Agent", in: window))
@@ -98,39 +123,86 @@ final class SettingsViewTests: XCTestCase {
                 publicKeyHex: String(repeating: "cd", count: 32),
                 createdAt: Date(timeIntervalSince1970: 1_000)
             ),
-            connectionState: .connected,
+            connectionStatus: .live,
             activeConversation: conversation(id: "conversation-42")
         )
+        model.agents = [ViewFixtures.agent()]
         var didClose = false
         let window = ViewHost.host(
             SettingsView(viewModel: model) {
                 didClose = true
-            }
+            },
+            size: tallWindow
         )
 
         XCTAssertNotNil(ViewHost.element(labelContains: "Settings", in: window))
-        XCTAssertNotNil(ViewHost.element(labelContains: hostedAddress, in: window))
-        XCTAssertNotNil(ViewHost.element(labelContains: "conversation-42", in: window))
-        XCTAssertNotNil(ViewHost.element(labelContains: "Reconnect", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Your address 0xaaaaaaaa", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Show QR code", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: ViewFixtures.agent().displayName, in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Version", in: window))
+        // Diagnostics start folded.
+        XCTAssertNil(ViewHost.element(labelContains: "conversation-42", in: window))
+        XCTAssertTrue(ViewHost.activate(labelContains: "Diagnostics", in: window))
+        ViewHost.pump(0.3)
+        XCTAssertNotNil(ViewHost.waitForElement(labelContains: "conversation-42", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Live", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: String(repeating: "cd", count: 32), in: window))
 
         XCTAssertTrue(ViewHost.activateButton(labelContains: "Reconnect", in: window))
         ViewHost.pump(0.2)
         XCTAssertEqual(model.reconnectCallCount, 1)
 
-        XCTAssertTrue(ViewHost.activateButton(labelContains: "Close", in: window))
+        XCTAssertTrue(ViewHost.activateButton(labelContains: "Done", in: window))
         XCTAssertTrue(didClose)
+    }
+
+    func testIdentityOffersBothLinkRowsAndTheLinkSheetOpensAndCancels() {
+        let model = TestSettingsModel(identity: nil, connectionStatus: .notConnected, activeConversation: nil)
+        let window = ViewHost.host(SettingsView(viewModel: model), size: tallWindow)
+
+        XCTAssertNotNil(ViewHost.element(labelContains: "Link from another device", in: window))
+        XCTAssertTrue(ViewHost.activateButton(labelContains: "Link a new device", in: window))
+        ViewHost.pump(0.5)
+
+        // The iPhone opens on code entry in both roles, so opening the sheet starts no listener.
+        XCTAssertNotNil(ViewHost.element(labelContains: "Link Code", in: window), "the giver's code entry is showing")
+        XCTAssertNotNil(ViewHost.element(labelContains: "Show my code instead", in: window))
+        XCTAssertTrue(ViewHost.activateButton(labelContains: "Cancel", in: window))
+        ViewHost.pump(0.5)
+        XCTAssertNil(ViewHost.element(labelContains: "Link Code", in: window), "Cancel closes the sheet")
+    }
+
+    func testFirstLaunchOffersANewIdentityOrLinkingFromAnotherDevice() {
+        var finished = 0
+        let window = ViewHost.host(
+            IdentityOnboardingView(keyStore: InMemoryPrivateKeyStore(), onReplaced: { _ in }, onFinish: { finished += 1 })
+        )
+
+        XCTAssertTrue(ViewHost.activateButton(labelContains: "Link from another device", in: window))
+        ViewHost.pump(0.5)
+        // The receive sheet from Settings: it opens on the scanner and says where the other device shows its code.
+        XCTAssertNotNil(ViewHost.element(labelContains: "Link a new device", in: window), "the receive sheet is showing")
+        XCTAssertNotNil(ViewHost.element(labelContains: "Show my code instead", in: window), "the receiver scans first")
+        XCTAssertTrue(ViewHost.activateButton(labelContains: "Cancel", in: window))
+        ViewHost.pump(0.5)
+        XCTAssertEqual(finished, 0, "closing the link sheet goes back to the choice")
+
+        XCTAssertTrue(ViewHost.activateButton(labelContains: "Create a new identity", in: window))
+        XCTAssertEqual(finished, 1)
     }
 
     func testSettingsShowsPlaceholdersWhenIdentityAndSessionAreMissing() {
         let model = TestSettingsModel(
             identity: nil,
-            connectionState: .disconnected,
+            connectionStatus: .notConnected,
             activeConversation: nil
         )
-        let window = ViewHost.host(SettingsView(viewModel: model))
+        let window = ViewHost.host(SettingsView(viewModel: model), size: tallWindow)
 
         XCTAssertNotNil(ViewHost.element(labelContains: "Creating...", in: window))
-        XCTAssertNotNil(ViewHost.element(labelContains: "None", in: window))
+        XCTAssertTrue(ViewHost.activate(labelContains: "Diagnostics", in: window))
+        ViewHost.pump(0.3)
+        XCTAssertNotNil(ViewHost.waitForElement(labelContains: "None", in: window))
     }
 }
 
@@ -143,6 +215,9 @@ final class AgentQRCodeShareViewTests: XCTestCase {
         XCTAssertNotNil(window.rootViewController)
     }
 }
+
+/// Tall enough that the List draws the rows Diagnostics opens.
+private let tallWindow = CGSize(width: 390, height: 1600)
 
 private let hostedAddress = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -174,21 +249,34 @@ private func conversation(id: String) -> Conversation {
 @MainActor
 private final class TestSettingsModel: SettingsFeatureModel {
     @Published var identity: StoredIdentity?
-    @Published var connectionState: ConversationConnectionState
+    @Published var connectionStatus: ChatConnectionStatus
     @Published var activeConversation: Conversation?
+    @Published var agents: [SavedAgent] = []
+    var activeAgent: SavedAgent? { agents.first }
     private(set) var reconnectCallCount = 0
+    let deviceLinkKeyStore: any DeviceLinkKeyStore = InMemoryPrivateKeyStore()
 
     init(
         identity: StoredIdentity?,
-        connectionState: ConversationConnectionState,
+        connectionStatus: ChatConnectionStatus,
         activeConversation: Conversation?
     ) {
         self.identity = identity
-        self.connectionState = connectionState
+        self.connectionStatus = connectionStatus
         self.activeConversation = activeConversation
     }
 
     func reconnect() async {
         reconnectCallCount += 1
     }
+
+    func adoptReplacedIdentity(previousAddress: String) async {}
+
+    func saveAgent(id: String?, name: String, address: String) -> SavedAgent? { nil }
+
+    func fetchAgentName(for address: String) async -> String? { nil }
+
+    let linkAgentNames: [DeviceLinkAgentName] = []
+
+    func applyLinkedAgentNames(_ list: [DeviceLinkAgentName]) throws {}
 }

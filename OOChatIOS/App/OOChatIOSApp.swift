@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 // The entry of app.
@@ -7,10 +8,22 @@ struct OOChatIOSApp: App {
     // `ContentView` takes it as a @StateObject, matching how it was constructed
     // before — ChatViewModel is an ObservableObject, not @Observable.
     @StateObject private var viewModel = ChatViewModel()
+    private let chatNotifier = ChatNotifier()
+
+    init() {
+        OOFonts.register()
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView(viewModel: viewModel)
+                .task {
+                    viewModel.chatNotifier = chatNotifier
+                    chatNotifier.onOpenConversation = { viewModel.selectConversation(withID: $0) }
+                    chatNotifier.onApprovalAnswer = { answer, approvalID, conversationID in
+                        viewModel.answerApproval(answer, approvalID: approvalID, conversationID: conversationID)
+                    }
+                }
                 // An `openonion://agent/0x…` link adds the agent and selects it, so
                 // an address can be handed over in an email or from a web page
                 // instead of being typed out as 64 hex characters.

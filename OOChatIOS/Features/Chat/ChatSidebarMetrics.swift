@@ -11,7 +11,6 @@ enum SidebarMetrics {
     static let rowLeading: CGFloat = 22
     static let compactRowLeading: CGFloat = 12
     static let compactRowTrailing: CGFloat = 10
-    static let headerTopPadding: CGFloat = 8
     static let headerBottomPadding: CGFloat = 26
     static let headerSpacing: CGFloat = 12
     static let headerLogoSpacing: CGFloat = 12
@@ -27,24 +26,17 @@ enum SidebarMetrics {
     static let searchFieldSpacing: CGFloat = 8
     static let searchFieldHorizontalPadding: CGFloat = 12
     static let searchFieldHeight: CGFloat = 42
-    static let searchClearButtonSize: CGFloat = 24
     static let agentsHeaderTopPadding: CGFloat = 0
     static let agentsHeaderBottomPadding: CGFloat = 10
     static let sectionHeaderHorizontalPadding: CGFloat = 10
     static let minimumRowHeight: CGFloat = 0
-    static let footerButtonSize: CGFloat = 50
-    static let footerTopPadding: CGFloat = 12
-    static let footerBottomPadding: CGFloat = 20
-    static let footerOverlayHeight = footerTopPadding + footerButtonSize + footerBottomPadding
     static let footerButtonHorizontalPadding: CGFloat = 18
     static let settingsButtonStrokeOpacity: Double = 0.20
     static let chevronWidth: CGFloat = 24
     static let agentRowSpacing: CGFloat = 8
-    static let agentRowHeight: CGFloat = 34
     static let avatarSize: CGFloat = 32
     static let agentAvatarSpacing: CGFloat = 10
     static let agentNameSpacing: CGFloat = 8
-    static let agentActionButtonSize: CGFloat = 34
     static let agentActionIconSize: CGFloat = 16
     static let sessionIndent: CGFloat = 36
     static let sessionIconWidth: CGFloat = 18
@@ -53,8 +45,8 @@ enum SidebarMetrics {
     static let conversationTextLeading = rowLeading + rowHorizontalPadding + sessionIndent + sessionIconWidth + sessionContentSpacing
 
     static let primaryRowInsets = EdgeInsets(top: 2, leading: compactRowLeading, bottom: 2, trailing: compactRowTrailing)
-    static let emptyRowInsets = EdgeInsets(top: 8, leading: rowLeading, bottom: 8, trailing: outerTrailing)
-    static let agentRowInsets = EdgeInsets(top: 4, leading: rowLeading, bottom: 4, trailing: 14)
-    static let conversationRowInsets = EdgeInsets(top: 0, leading: rowLeading, bottom: 0, trailing: compactRowTrailing)
-    static let emptySessionRowInsets = EdgeInsets(top: 6, leading: conversationTextLeading, bottom: 6, trailing: outerTrailing)
+    static let conversationRowInsets = EdgeInsets(top: 0, leading: compactRowLeading, bottom: 0, trailing: compactRowTrailing)
+    /// An open agent lists this many chats, then "Show all (n)" (spec D2).
+    static let chatsBeforeShowAll = 5
+    static let emptySessionRowInsets = EdgeInsets(top: 6, leading: compactRowLeading + 24, bottom: 6, trailing: outerTrailing)
 }

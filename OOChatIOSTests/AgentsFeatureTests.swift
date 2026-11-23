@@ -1,4 +1,7 @@
 import Combine
+import ConnectOnionKit
+import Security
+import UserNotifications
 import XCTest
 @testable import OOChatIOS
 
@@ -49,7 +52,7 @@ final class AgentsFeatureTests: XCTestCase {
                 conversations: [
                     firstCon,
                     oldSecondCon,
-                    newSecondCon,
+                    newSecondCon
                 ],
                 activeAgentID: first.id,
                 activeConversationID: firstCon.id
@@ -107,7 +110,7 @@ final class AgentsFeatureTests: XCTestCase {
 
         XCTAssertEqual(conversation.agentID, agent.id)
         XCTAssertEqual(conversation.agentAddress, agent.address)
-        XCTAssertEqual(conversation.title, "New mobile session")
+        XCTAssertEqual(conversation.title, "New chat")
         XCTAssertFalse(conversation.id.isEmpty)
         XCTAssertTrue(conversation.messages.isEmpty)
         XCTAssertTrue(view.prompt.isEmpty)
@@ -339,6 +342,31 @@ final class AgentsFeatureTests: XCTestCase {
         withExtendedLifetime(cancellable) {}
     }
 
+    // Tapping agent B on the rail while a chat with A is open: the nav bar's New chat goes to B.
+    func testNewChatGoesToTheAgentPickedOnTheRail() throws {
+        let agentA = makeAgent(id: "agentA", address: "0xaaa", updatedAt: seconds(1000))
+        let agentB = makeAgent(id: "agentB", address: "0xbbb", updatedAt: seconds(2000))
+        let chatWithA = makeConversation(id: "conA", agent: agentA, updatedAt: seconds(1000))
+        let repo = SpyConversationRepository(
+            snapshot: ChatSnapshot(
+                agents: [agentA, agentB],
+                conversations: [chatWithA],
+                activeAgentID: agentA.id,
+                activeConversationID: chatWithA.id
+            )
+        )
+        let view = ChatViewModel(store: repo)
+        XCTAssertEqual(view.newChatAgent?.id, agentA.id)
+
+        view.pickOnRail(agentB)
+
+        XCTAssertEqual(view.paneAgent?.id, agentB.id)
+        XCTAssertEqual(view.newChatAgent?.id, agentB.id)
+        let created = view.createConversation(for: try XCTUnwrap(view.newChatAgent))
+        XCTAssertEqual(created.agentID, agentB.id)
+        XCTAssertEqual(view.paneAgent?.id, agentB.id)
+    }
+
     // Search forwards the query to the store and returns its results unfiltered.
     func testSearchConversationsForwardsToStore() {
         let agent = makeAgent(id: "agent1", address: "0xaaa", updatedAt: seconds(1000))
@@ -366,6 +394,97 @@ final class AgentsFeatureTests: XCTestCase {
         let results = view.searchConversations("note", for: mine)
 
         XCTAssertEqual(results.map(\.id), [mineHit.id])
+    }
+
+    func testNotifiesOnlyWhileTheAppIsInTheBackground() {
+        XCTAssertTrue(ChatNotifier.shouldNotify(isAppActive: false))
+        XCTAssertFalse(ChatNotifier.shouldNotify(isAppActive: true))
+        // A turn sent from a linked device notifies there, not here as well.
+        XCTAssertFalse(ChatNotifier.shouldNotify(isAppActive: false, isMirrored: true))
+    }
+
+    // Allow once from a notification that launched the app: the card hasn't loaded yet, so the
+    // answer waits and goes out when the approval arrives.
+    func testAnApprovalAnsweredBeforeItsCardLoadsIsAnsweredWhenItArrives() {
+        let agent = makeAgent(id: "agent1", address: "0xaaa", updatedAt: seconds(1000))
+        let chat = makeConversation(id: "con1", agent: agent, updatedAt: seconds(1000))
+        let repo = SpyConversationRepository(
+            snapshot: ChatSnapshot(agents: [agent], conversations: [chat], activeAgentID: nil, activeConversationID: nil)
+        )
+        let view = ChatViewModel(store: repo)
+
+        view.answerApproval(.allowOnce, approvalID: "appr1", conversationID: chat.id)
+
+        XCTAssertEqual(view.activeConversationID, chat.id)
+        XCTAssertEqual(view.queuedApprovalAnswer?.approvalID, "appr1")
+        let request = ToolApprovalRequest(id: "appr1", tool: "bash", arguments: [:])
+        view.interactionDidArrive(.approval(request), conversationID: chat.id)
+        XCTAssertNil(view.queuedApprovalAnswer)
+    }
+
+    func testNotificationPreviewIsTheReplysFirstShortLine() {
+        XCTAssertEqual(ChatNotifier.preview(of: "Done.\nHere are the details."), "Done.")
+        XCTAssertEqual(ChatNotifier.preview(of: "  "), "Finished.")
+        let long = String(repeating: "a", count: 150)
+        XCTAssertEqual(ChatNotifier.preview(of: long).count, 100)
+        XCTAssertTrue(ChatNotifier.preview(of: long).hasSuffix("…"))
+    }
+
+    func testApprovalNotificationNamesTheAgentAndWhatItWillDo() {
+        let request = ToolApprovalRequest(
+            id: "appr1",
+            tool: "bash",
+            arguments: ["command": .string("./scripts/run_kit_tests.sh")]
+        )
+        let content = ChatNotifier.approvalContent(conversationID: "con1", agentName: "PCAgent", request: request)
+
+        XCTAssertEqual(content.title, "PCAgent needs your approval")
+        XCTAssertEqual(content.body, "Run a shell command using ./scripts/run_kit_tests.sh.")
+        XCTAssertEqual(content.categoryIdentifier, ChatNotifier.approvalCategory)
+        XCTAssertEqual(content.userInfo[ChatNotifier.conversationKey] as? String, "con1")
+        XCTAssertEqual(content.userInfo[ChatNotifier.approvalKey] as? String, "appr1")
+    }
+
+    func testDraftSurvivesARelaunch() {
+        let repo = makeDraftRepository()
+
+        let first = ChatViewModel(store: repo)
+        first.prompt = "half-written thought"
+        XCTAssertEqual(repo.savedDrafts, ["con1": "half-written thought"])
+
+        let relaunched = ChatViewModel(store: repo)
+        XCTAssertEqual(relaunched.prompt, "half-written thought")
+    }
+
+    func testClearedOrDeletedDraftIsForgotten() {
+        let repo = makeDraftRepository()
+        let viewModel = ChatViewModel(store: repo)
+
+        viewModel.prompt = "draft"
+        // Sending clears the prompt the same way.
+        viewModel.prompt = ""
+        XCTAssertEqual(repo.savedDrafts, [:])
+
+        viewModel.prompt = "draft again"
+        guard let conversation = viewModel.activeConversation else {
+            return XCTFail("Expected con1 to be open")
+        }
+        viewModel.deleteConversation(conversation)
+        XCTAssertEqual(repo.savedDrafts, [:])
+    }
+
+    /// One agent with one open chat, "con1".
+    private func makeDraftRepository() -> SpyConversationRepository {
+        let agent = makeAgent(id: "agent1", address: "0xaaa", updatedAt: seconds(1000))
+        let conversation = makeConversation(id: "con1", agent: agent, updatedAt: seconds(1000))
+        return SpyConversationRepository(
+            snapshot: ChatSnapshot(
+                agents: [agent],
+                conversations: [conversation],
+                activeAgentID: agent.id,
+                activeConversationID: conversation.id
+            )
+        )
     }
 
     private func makeAgent(id: String, address: String, updatedAt: Date) -> SavedAgent {
@@ -400,6 +519,259 @@ final class AgentsFeatureTests: XCTestCase {
     }
 }
 
+/// One agent per Address, and the Agent Name list a Device Link brings in.
+@MainActor
+final class AgentNameTests: XCTestCase {
+    private let address = "0x" + String(repeating: "ab", count: 32)
+    private let upperAddress = "0x" + String(repeating: "AB", count: 32)
+    private let otherAddress = "0x" + String(repeating: "cd", count: 32)
+    private let identityService = "agent-name-tests.\(UUID().uuidString)"
+
+    override func tearDown() {
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: identityService] as CFDictionary)
+        super.tearDown()
+    }
+
+    private func agent(_ id: String, _ address: String, _ name: String, created: TimeInterval) -> SavedAgent {
+        SavedAgent(id: id, address: address, name: name, createdAt: Date(timeIntervalSince1970: created),
+                   updatedAt: Date(timeIntervalSince1970: created))
+    }
+
+    private func chat(_ id: String, _ agent: SavedAgent) -> Conversation {
+        Conversation(id: id, title: id, agentID: agent.id, agentAddress: agent.address, mode: .safe,
+                     createdAt: agent.createdAt, updatedAt: agent.createdAt, messages: [], serverSession: nil)
+    }
+
+    private func model(_ agents: [SavedAgent], _ chats: [Conversation] = [], active: String? = nil,
+                       repo: ConversationRepository? = nil, transport: MockAgentTransport = MockAgentTransport()) -> ChatViewModel {
+        let store = repo ?? InMemoryConversationRepository(snapshot: ChatSnapshot(
+            agents: agents, conversations: chats, activeAgentID: active, activeConversationID: nil
+        ))
+        return ChatViewModel(store: store, identityStore: IdentityStore(service: identityService), client: transport,
+                             networkMonitor: MockNetworkMonitor())
+    }
+
+    // By hand, QR and deep link all save through saveAgent with no id.
+    func testAddingAnAddressThatExistsInAnyCaseUpdatesThatAgent() throws {
+        let mine = agent("mine", address, "Mine", created: 100)
+        let viewModel = model([mine], [chat("c1", mine)])
+
+        let saved = try XCTUnwrap(viewModel.saveAgent(name: "Reported", address: upperAddress))
+
+        XCTAssertEqual(viewModel.agents.map(\.id), ["mine"])
+        XCTAssertEqual(saved.id, "mine")
+        XCTAssertEqual(saved.name, "Mine", "a reported or prefilled name only fills the default on add")
+        XCTAssertEqual(viewModel.conversations(for: saved).map(\.id), ["c1"])
+    }
+
+    func testConnectingByAnAddressThatExistsInAnyCaseUsesThatAgent() async {
+        let mine = agent("mine", address, "Mine", created: 100)
+        let viewModel = model([mine], [chat("c1", mine)])
+        viewModel.agentAddressDraft = upperAddress
+
+        let connected = await viewModel.connectToAgent()
+
+        XCTAssertEqual(connected?.id, "mine")
+        XCTAssertEqual(viewModel.agents.map(\.id), ["mine"])
+    }
+
+    func testDuplicatesLoadedFromTheStoreMergeIntoTheEarliestCreatedWithAllTheirChats() throws {
+        let older = agent("older", address, "Older", created: 100)
+        let newer = agent("newer", upperAddress, "Newer", created: 200)
+        let other = agent("other", otherAddress, "Other", created: 300)
+        // The real store: deleting an agent there also deletes the chats still on it.
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: identityService))
+        defer { defaults.removePersistentDomain(forName: identityService) }
+        let repo = try SwiftDataConversationRepository(inMemory: true, defaults: defaults)
+        [newer, other, older].forEach(repo.upsertAgent)
+        var deleted = chat("t1", newer)
+        deleted.tombstoneUpdated = Date(timeIntervalSince1970: 500)
+        [chat("c1", older), chat("c2", newer), chat("c3", newer), chat("c4", other), deleted].forEach(repo.upsertConversation)
+        repo.saveActive(agentID: newer.id, conversationID: "c2")
+
+        let viewModel = model([], repo: repo)
+
+        XCTAssertEqual(Set(viewModel.agents.map(\.id)), ["older", "other"])
+        XCTAssertEqual(viewModel.agent(withID: "older")?.name, "Older")
+        XCTAssertEqual(Set(viewModel.conversations(for: older).map(\.id)), ["c1", "c2", "c3"])
+        XCTAssertEqual(viewModel.activeAgentID, "older")
+        // Saved, so the next launch loads one agent too.
+        let reloaded = repo.load()
+        XCTAssertEqual(Set(reloaded.agents.map(\.id)), ["older", "other"])
+        XCTAssertEqual(Set(reloaded.conversations.filter { $0.agentID == "older" }.map(\.id)), ["c1", "c2", "c3", "t1"])
+        XCTAssertNotNil(reloaded.conversations.first { $0.id == "t1" }?.tombstoneUpdated, "a Tombstone moves, it is not deleted")
+    }
+
+    func testHistoryRestoreRunsOncePerAddressAfterDuplicatesMerge() async {
+        let older = agent("older", address, "Older", created: 100)
+        let newer = agent("newer", address, "Newer", created: 200)
+        let viewModel = model([newer, older, agent("other", otherAddress, "Other", created: 300)])
+        let fetcher = CountingFetcher()
+        viewModel.historyFetcher = fetcher
+
+        await viewModel.refreshHistory()
+
+        XCTAssertEqual(fetcher.asked.sorted(), [address, otherAddress])
+    }
+
+    func testALinkRenamesTheMatchingAgentAddsTheMissingOneAndLeavesTheRest() async throws {
+        let onlyHere = "0x" + String(repeating: "ef", count: 32)
+        let viewModel = model([agent("mine", address, "Mine", created: 100), agent("here", onlyHere, "Only here", created: 200)])
+        let fetcher = CountingFetcher()
+        viewModel.historyFetcher = fetcher
+
+        try await link(into: viewModel, giving: [(upperAddress, "Theirs"), (otherAddress, "New")])
+
+        XCTAssertEqual(viewModel.agent(withID: "mine")?.name, "Theirs")
+        XCTAssertEqual(viewModel.agent(withID: "here")?.name, "Only here")
+        let added = try XCTUnwrap(viewModel.agents.first { $0.address == otherAddress })
+        XCTAssertEqual(added.name, "New")
+        XCTAssertEqual(viewModel.agents.count, 3)
+        // History Restore runs for the added agent with no setup.
+        await eventually { fetcher.asked.contains(otherAddress) }
+    }
+
+    func testAgentsThatCannotBeSavedStillLeaveTheNewIdentityAndTheLinkDone() async throws {
+        let viewModel = model([], repo: FailingAgentRepository())
+
+        let giver = try await link(into: viewModel, giving: [(otherAddress, "New")])
+
+        XCTAssertEqual(try IdentityStore(service: identityService).loadOrCreateIdentity().address, giver)
+        await eventually { viewModel.identity?.address == giver }
+    }
+
+    // Deleting an agent deletes the chats still on it, so an extra whose chats could not move stays.
+    func testADuplicateWhoseChatsCannotMoveIsKept() {
+        let older = agent("older", address, "Older", created: 100)
+        let newer = agent("newer", address, "Newer", created: 200)
+        let repo = UnmovableChatsRepository(snapshot: ChatSnapshot(
+            agents: [older, newer], conversations: [chat("c2", newer)], activeAgentID: nil, activeConversationID: nil
+        ))
+
+        _ = model([], repo: repo)
+
+        XCTAssertEqual(repo.deletedAgentIDs, [])
+    }
+
+    func testEditingAnAgentToAnAddressAnotherAgentHasIsRefused() {
+        let viewModel = model([agent("mine", address, "Mine", created: 100), agent("other", otherAddress, "Other", created: 200)])
+
+        let saved = viewModel.saveAgent(id: "other", name: "Other", address: upperAddress)
+
+        XCTAssertNil(saved)
+        XCTAssertNotNil(viewModel.errorMessage)
+        XCTAssertEqual(viewModel.agent(withID: "other")?.address, otherAddress)
+    }
+
+    func testTheGiversOwnAgentsAreUntouchedByALink() async throws {
+        let mine = agent("mine", address, "Mine", created: 100)
+        let viewModel = model([mine])
+        let receiver = try DeviceLinkReceiver()
+        let flow = DeviceLinkFlow(
+            role: .giving, keyStore: viewModel.deviceLinkKeyStore, agentNames: { viewModel.linkAgentNames },
+            ownerCheck: { true },
+            give: { giver, approve in
+                let verified = try giver.verify(try receiver.start())
+                guard await approve() else { throw DeviceLinkError.cancelled }
+                let identity = try receiver.accept(try giver.seal(for: verified))
+                XCTAssertEqual(identity.agentNames.map(\.name), ["Mine"])
+            }
+        )
+
+        flow.submit(try receiver.offer.qrPayload)
+        await eventually { flow.step == .confirmingSend }
+        flow.confirm()
+        await eventually { if case .done = flow.step { true } else { false } }
+
+        XCTAssertEqual(viewModel.agents, [mine])
+    }
+
+    func testTheGiverSendsEachAgentByItsLowerCasedAddressWithItsName() {
+        let viewModel = model([
+            agent("mine", upperAddress, "Mine", created: 100),
+            agent("other", otherAddress, "Other", created: 200)
+        ])
+
+        XCTAssertEqual(Set(viewModel.linkAgentNames.map(\.address)), [address, otherAddress])
+        XCTAssertEqual(Set(viewModel.linkAgentNames.map(\.name)), ["Mine", "Other"])
+    }
+
+    /// Links `viewModel`'s device as the Receiving Device, the way the link sheet wires it, from an in-memory
+    /// giver holding `giving`. Returns the giver's Address once the link is done.
+    @discardableResult
+    private func link(into viewModel: ChatViewModel, giving: [(String, String)]) async throws -> String {
+        let giverStore = InMemoryPrivateKeyStore()
+        let names = giving.compactMap { DeviceLinkAgentName(address: $0.0, name: $0.1) }
+        let flow = DeviceLinkFlow(
+            role: .receiving,
+            keyStore: viewModel.deviceLinkKeyStore,
+            onReplaced: { previous in Task { await viewModel.adoptReplacedIdentity(previousAddress: previous) } },
+            onAgentNames: { try viewModel.applyLinkedAgentNames($0) },
+            receive: { receiver, accept in
+                let giver = try DeviceLinkGiver(scanning: receiver.offer, keyStore: giverStore, agentNames: names)
+                let identity = try receiver.accept(try giver.seal(for: try giver.verify(try receiver.start())))
+                guard await accept(identity) else { throw DeviceLinkError.cancelled }
+                return identity
+            }
+        )
+        let giverAddress = try OIPSigner(keyStore: giverStore).address()
+        flow.start()
+        await eventually { if case .confirmingReplace = flow.step { true } else { false } }
+        flow.confirm()
+        await eventually { flow.step == .done(address: giverAddress) }
+        return giverAddress
+    }
+
+    private func eventually(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<400 where !condition() {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(condition(), "timed out", file: file, line: line)
+    }
+}
+
+/// Records agent deletes; moving a chat to another agent fails.
+@MainActor
+private final class UnmovableChatsRepository: ConversationRepository {
+    private let inner: InMemoryConversationRepository
+    private(set) var deletedAgentIDs: [String] = []
+    init(snapshot: ChatSnapshot) { inner = InMemoryConversationRepository(snapshot: snapshot) }
+    func load() -> ChatSnapshot { inner.load() }
+    func upsertConversation(_ conversation: Conversation) { inner.upsertConversation(conversation) }
+    func deleteConversation(id: String) { inner.deleteConversation(id: id) }
+    func upsertAgent(_ agent: SavedAgent) { inner.upsertAgent(agent) }
+    func deleteAgent(id: String) { deletedAgentIDs.append(id) }
+    func saveActive(agentID: String?, conversationID: String?) {}
+    func search(_ query: String) -> [Conversation] { [] }
+    func updateConversationMetadataResult(_ conversation: Conversation) -> Result<Void, ConversationRepositoryError> {
+        .failure(ConversationRepositoryError(operation: .saveConversation, underlyingError: CocoaError(.fileWriteNoPermission)))
+    }
+}
+
+/// Saves everything but agents.
+@MainActor
+private final class FailingAgentRepository: ConversationRepository {
+    private let inner = InMemoryConversationRepository()
+    func load() -> ChatSnapshot { inner.load() }
+    func upsertConversation(_ conversation: Conversation) { inner.upsertConversation(conversation) }
+    func deleteConversation(id: String) { inner.deleteConversation(id: id) }
+    func upsertAgent(_ agent: SavedAgent) {}
+    func deleteAgent(id: String) { inner.deleteAgent(id: id) }
+    func saveActive(agentID: String?, conversationID: String?) {}
+    func search(_ query: String) -> [Conversation] { [] }
+    func upsertAgentResult(_ agent: SavedAgent) -> Result<Void, ConversationRepositoryError> {
+        .failure(ConversationRepositoryError(operation: .saveAgent, underlyingError: CocoaError(.fileWriteNoPermission)))
+    }
+}
+
+private final class CountingFetcher: SessionsFetching {
+    private(set) var asked: [String] = []
+    func sessions(agentAddress: String) async throws -> [ConnectOnionHostedSession] {
+        asked.append(agentAddress)
+        return []
+    }
+}
+
 private struct SavedActive: Equatable {
     let agentID: String?
     let conversationID: String?
@@ -414,6 +786,7 @@ private final class SpyConversationRepository: ConversationRepository {
     private(set) var deletedAgentIDs: [String] = []
     private(set) var savedActiveCalls: [SavedActive] = []
     private(set) var searchQueries: [String] = []
+    private(set) var savedDrafts: [String: String] = [:]
     var searchResults: [Conversation] = []
 
     init(snapshot: ChatSnapshot) {
@@ -449,5 +822,13 @@ private final class SpyConversationRepository: ConversationRepository {
     func search(_ query: String) -> [Conversation] {
         searchQueries.append(query)
         return searchResults
+    }
+
+    func loadDrafts() -> [String: String] {
+        savedDrafts
+    }
+
+    func saveDrafts(_ drafts: [String: String]) {
+        savedDrafts = drafts
     }
 }
