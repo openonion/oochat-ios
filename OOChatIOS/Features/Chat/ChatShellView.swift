@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 import UIKit
 
@@ -10,6 +11,11 @@ struct ChatShellView: View {
     @State private var isSidebarSearchFocused = false
     @State private var dragOffset: CGFloat = 0
     @State private var activeContent: SidebarContent = .chat
+    @State private var isControlCenterOpen = true
+    @State private var agentView: OOAgentView = .chat
+    @State private var workRoomPath: [String] = []
+    // Bumped by the chat's empty state; the sidebar owns the Add Agent form and opens it.
+    @State private var addAgentRequest = 0
 
     init(
         viewModel: ChatViewModel,
@@ -37,25 +43,51 @@ struct ChatShellView: View {
             }
             .ignoresSafeArea()
         }
+        // A Work Room belongs to its chat; another chat starts at its own timeline.
+        .onChange(of: viewModel.activeConversationID) {
+            workRoomPath = []
+        }
     }
 
     // On a regular-width canvas the sidebar is permanent and sits beside the content
     // instead of sliding over it: at iPad widths the drawer would push the chat off-screen
     // while leaving most of the display unused. Compact widths — every iPhone, and iPad
     // Slide Over — keep the drawer below.
+    // with dashboard, tabs in portrait, side by side in landscape
     private func sideBySideLayout(proxy: GeometryProxy, safeAreaInsets: EdgeInsets) -> some View {
-        HStack(spacing: 0) {
+        let contentWidth = proxy.size.width - SidebarShellMetrics.permanentSidebarWidth - 1
+        let paneWidth = ControlCenterLayout.paneWidth(contentWidth: contentWidth)
+        let dashboard = activeContent == .chat ? viewModel.activeDashboard : nil
+        return HStack(spacing: 0) {
             sidebar(safeAreaInsets: safeAreaInsets, isOpen: true)
                 .frame(width: SidebarShellMetrics.permanentSidebarWidth)
 
             Divider()
 
-            contentView(for: activeContent)
+            contentView(for: activeContent, controlCenter: controlCenter(for: dashboard, paneWidth: paneWidth))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(contentKeyboardSafeAreaRegions, edges: .bottom)
+
+            // The Control Center is absent inside a Work Room; isControlCenterOpen is left as it was.
+            if let dashboard, let paneWidth, isControlCenterOpen, workRoomPath.isEmpty {
+                Divider()
+
+                OOControlCenterPane(
+                    dashboard: dashboard,
+                    skills: viewModel.activeAgentSkills,
+                    onRunSkill: viewModel.runControlCenterSkill,
+                    onCollapse: {
+                        withAnimation(AppMotion.stateChange(reduceMotion: reduceMotion)) {
+                            isControlCenterOpen = false
+                        }
+                    }
+                )
+                .frame(width: paneWidth)
+                .transition(.move(edge: .trailing))
+            }
         }
         .frame(width: proxy.size.width, height: proxy.size.height)
-        .background(Color(.systemBackground))
+        .background(OOColor.paper)
     }
 
     private func drawerLayout(proxy: GeometryProxy, safeAreaInsets: EdgeInsets) -> some View {
@@ -75,9 +107,9 @@ struct ChatShellView: View {
                 .offset(x: reduceMotion ? 0 : -SidebarShellMetrics.sidebarParallax * (1 - progress))
                 .zIndex(0)
 
-                contentView(for: activeContent)
+                contentView(for: activeContent, controlCenter: controlCenter(for: viewModel.activeDashboard, paneWidth: nil))
                 .frame(width: proxy.size.width, height: proxy.size.height)
-                .background(Color(.systemBackground))
+                .background(OOColor.paper)
                 .ignoresSafeArea(contentKeyboardSafeAreaRegions, edges: .bottom)
                 .allowsHitTesting(progress == 0)
                 .clipShape(contentMask(cornerRadius: cornerRadius))
@@ -109,7 +141,7 @@ struct ChatShellView: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .simultaneousGesture(sidebarDrag(openOffset: openOffset))
-            .background(Color(.systemBackground))
+            .background(OOColor.paper)
             .clipped()
     }
 
@@ -133,21 +165,43 @@ struct ChatShellView: View {
             },
             onSettings: {
                 showContentFromSidebar(.settings)
+            },
+            addAgentRequest: addAgentRequest
+        )
+    }
+
+    // Control Center
+    private func controlCenter(for dashboard: OIPDashboard?, paneWidth: CGFloat?) -> ChatControlCenter? {
+        guard let dashboard else {
+            return nil
+        }
+        guard paneWidth == nil else {
+            return .beside(isOpen: isControlCenterOpen) {
+                withAnimation(AppMotion.stateChange(reduceMotion: reduceMotion)) {
+                    isControlCenterOpen.toggle()
+                }
             }
+        }
+        return .tabs(
+            dashboard: dashboard,
+            selection: $agentView,
+            attention: viewModel.activeChatAwaitsReader ? .chat : nil
         )
     }
 
     @ViewBuilder
-    private func contentView(for content: SidebarContent) -> some View {
+    private func contentView(for content: SidebarContent, controlCenter: ChatControlCenter? = nil) -> some View {
         switch content {
         case .chat:
             ChatView(
                 viewModel: viewModel,
                 showsComposer: isRegularWidth || !isSidebarSearchFocused,
-                showsSidebarButton: !isRegularWidth
-            ) {
-                openSidebar()
-            }
+                showsSidebarButton: !isRegularWidth,
+                controlCenter: controlCenter,
+                workRoomPath: $workRoomPath,
+                onAddAgent: { addAgentRequest += 1 },
+                onOpenSidebar: { openSidebar() }
+            )
         case .settings:
             SettingsView(viewModel: viewModel) {
                 returnToSidebar()
@@ -230,9 +284,10 @@ struct ChatShellView: View {
     }
 
     // The drawer only exists in compact widths; when the sidebar is permanent there is
-    // nothing to open, so the edge drag and the toolbar button both stand down.
+    // nothing to open, so the edge drag and the toolbar button both stand down. Inside a Work Room
+    // the same edge swipe goes Back, so the drawer stands down there too.
     private var canOpenSidebar: Bool {
-        !isRegularWidth
+        !isRegularWidth && workRoomPath.isEmpty
     }
 
     // Only the drawer hides the content behind a search keyboard; side by side, the chat
@@ -370,6 +425,22 @@ enum SidebarShellLayout {
         }
         let constant = SidebarShellMetrics.rubberBandConstant
         return (overshoot * dimension * constant) / (dimension + (constant * overshoot))
+    }
+}
+
+/// The Control Center pane
+enum ControlCenterLayout {
+    static let chatFloor: CGFloat = 360
+    static let minimumPane: CGFloat = 320
+    static let defaultPane: CGFloat = 500
+
+    /// nil when both do not fit, and the tabs are used instead.
+    static func paneWidth(contentWidth: CGFloat) -> CGFloat? {
+        let room = contentWidth - chatFloor
+        guard room >= minimumPane else {
+            return nil
+        }
+        return min(defaultPane, room)
     }
 }
 

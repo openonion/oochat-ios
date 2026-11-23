@@ -1,4 +1,5 @@
 import Combine
+import ConnectOnionKit
 import Foundation
 import UIKit
 
@@ -12,9 +13,18 @@ enum ConversationActivityState: Hashable {
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var identity: StoredIdentity?
+    @Published private(set) var agentProfilesByAddress: [String: OIPAgentProfile] = [:]
+    // Request mode per conversation: Remains set until mode_changed confirms it.
+    @Published private(set) var pendingModeByConversationID: [String: ChatMode] = [:]
+    // Server reported full access turns budget, keyed by conversation.
+    @Published private(set) var fullAccessTurnsLeftByConversationID: [String: Int] = [:]
     @Published var isConnecting = false
     @Published var errorMessage: String?
+     /// Set when the agent answered -32010. The Incompatible screen shows while it is non-nil.
+    @Published var incompatibility: OIPHandshake.Incompatibility?
     @Published var agentAddressDraft = ""
+    @Published var dashboards: [String: OIPDashboard] = [:]
+    @Published var hostStatuses: [String: String] = [:]
     @Published var prompt = "" {
         didSet {
             conversationState.updateActiveDraft(prompt)
@@ -129,12 +139,40 @@ final class ChatViewModel: ObservableObject {
         conversationState.activeAgent
     }
 
+    var activeAgentProfile: OIPAgentProfile? {
+        guard let address = activeAgent?.address else {
+            return nil
+        }
+        return agentProfilesByAddress[address.lowercased()]
+    }
+
     var activeConversation: Conversation? {
         conversationState.activeConversation
     }
 
     var activeMode: ChatMode {
         activeConversation?.mode ?? .safe
+    }
+
+    var activePendingMode: ChatMode? {
+        guard let id = activeConversationID else {
+            return nil
+        }
+        return pendingModeByConversationID[id]
+    }
+
+    var activeFullAccessTurnsLeft: Int? {
+        guard let id = activeConversationID else {
+            return nil
+        }
+        return fullAccessTurnsLeftByConversationID[id]
+    }
+
+    // Full access only when the host listed it. Hidden until a CONNECTED arrives, as on macOS
+    var offeredModes: [ChatMode] {
+        let available = activeConversation
+            .flatMap { deliveryCoordinator.availableModesByAgentAddress[$0.agentAddress] } ?? []
+        return ChatMode.offered.filter { $0 != .ulw || available.contains(.fullAccess) }
     }
 
     var connectionState: ConversationConnectionState {
@@ -324,7 +362,7 @@ final class ChatViewModel: ObservableObject {
             interactionCoordinator: interactionCoordinator,
             transport: transport
         )
-        let skillCoordinator = SkillLoadingCoordinator(transport: transport)
+        let skillCoordinator = SkillLoadingCoordinator()
         let presenceCoordinator = AgentPresenceCoordinator(
             availabilityChecker: transport,
             agentAddresses: { conversationState.agents.map(\.address) }
@@ -356,6 +394,8 @@ final class ChatViewModel: ObservableObject {
         if let storeError {
             self.errorMessage = "Couldn’t open your saved conversations, so this session won’t be saved. \(storeError.localizedDescription)"
         }
+        // Reopen the open chat with whatever was left unsent.
+        prompt = conversationState.activeDraft
         observeCoordinators()
         recoveryCoordinator.start()
     }
@@ -372,11 +412,19 @@ final class ChatViewModel: ObservableObject {
 
     /// Connects coordinator updates after all stored properties are ready.
     private func observeCoordinators() {
+        client.onAgentProfile = { [weak self] address, profile in
+            guard let self else {
+                return
+            }
+
+            self.agentProfilesByAddress[address.lowercased()] = profile
+            self.skillCoordinator.updateProfile(profile, for: address)
+        }
+        client.onSessionUpdate = { [weak self] conversationID, update in
+            self?.apply(update, forConversationID: conversationID)
+        }
         recoveryCoordinator.onRecoveryError = { [weak self] conversationID, error in
             self?.presentConnectionError(error, forConversationID: conversationID)
-        }
-        recoveryCoordinator.onReconnect = { [weak self] agent in
-            self?.skillCoordinator.refreshSkills(for: agent)
         }
         recoveryCoordinator.onNetworkAvailabilityChange = { [weak self] isOnline in
             self?.presenceCoordinator.networkAvailabilityDidChange(isOnline: isOnline)
@@ -386,6 +434,10 @@ final class ChatViewModel: ObservableObject {
         }
         deliveryCoordinator.onDeliveriesIdle = { [weak self] in
             self?.endBackgroundDeliveryHold()
+        }
+        // Covers our confirmations and the host's own (each full-access turn, and expiry).
+        deliveryCoordinator.onModeChanged = { [weak self] conversationID, mode, turnsLeft in
+            self?.fullAccessTurnsLeftByConversationID[conversationID] = mode == .fullAccess ? turnsLeft : nil
         }
         offlineStateCancellable = recoveryCoordinator.$isOffline
             .removeDuplicates()
@@ -438,7 +490,6 @@ final class ChatViewModel: ObservableObject {
         prompt = conversationState.activeDraft
         restorePendingAttachmentDrafts()
         agentAddressDraft = agent.address
-        skillCoordinator.loadSkillsIfNeeded(for: agent, isOffline: isOffline)
     }
 
     func selectConversation(_ conversation: Conversation) {
@@ -447,7 +498,6 @@ final class ChatViewModel: ObservableObject {
         restorePendingAttachmentDrafts()
         if let agent = agent(for: conversation) {
             agentAddressDraft = agent.address
-            skillCoordinator.loadSkillsIfNeeded(for: agent, isOffline: isOffline)
         }
     }
 
@@ -517,21 +567,11 @@ final class ChatViewModel: ObservableObject {
             _ = createConversation(for: agent)
         }
         restorePendingAttachmentDrafts()
-        skillCoordinator.loadSkillsIfNeeded(for: agent, isOffline: isOffline)
     }
 
-    func promptDidChange() {
-        guard skillCoordinator.isSlashQuery(prompt), let activeAgent else {
-            return
-        }
-        skillCoordinator.loadSkillsIfNeeded(for: activeAgent, isOffline: isOffline)
-    }
-
-    func prefetchActiveAgentSkills() {
-        guard let activeAgent else {
-            return
-        }
-        skillCoordinator.loadSkillsIfNeeded(for: activeAgent, isOffline: isOffline)
+    /// The skills the Control Center's buttons may run (SkillActionChecker in the kit pane).
+    var activeAgentSkills: [OIPAgentSkill]? {
+        activeAgentProfile?.skills
     }
 
     func selectSlashSkill(_ skill: AgentSkill) {
@@ -541,6 +581,7 @@ final class ChatViewModel: ObservableObject {
     func deleteConversation(_ conversation: Conversation) {
         cancelPendingInteractions(forConversationID: conversation.id)
         recoveryCoordinator.removeConnectionState(forConversationID: conversation.id)
+        forgetDashboard(forConversationID: conversation.id)
         conversationState.deleteConversation(conversation, currentDraft: prompt)
         imageDraftsByConversationID[conversation.id] = nil
         fileDraftsByConversationID[conversation.id] = nil
@@ -553,6 +594,7 @@ final class ChatViewModel: ObservableObject {
         for conversationID in deletedConversationIDs {
             cancelPendingInteractions(forConversationID: conversationID)
             recoveryCoordinator.removeConnectionState(forConversationID: conversationID)
+            forgetDashboard(forConversationID: conversationID)
         }
         conversationState.deleteAgent(agent, currentDraft: prompt)
         presenceCoordinator.agentsDidChange()
@@ -580,23 +622,42 @@ final class ChatViewModel: ObservableObject {
         conversationState.searchConversations(query, for: agent)
     }
 
+    // Asks the host to switch. The picker shows the mode as pending until mode_changed.
     func setMode(_ mode: ChatMode) {
-        guard var conversation = activeConversation else {
+        guard let conversation = activeConversation,
+              conversation.mode != mode,
+              pendingModeByConversationID[conversation.id] == nil else {
             return
         }
-        guard conversation.mode != mode else {
-            return
+        let id = conversation.id
+        pendingModeByConversationID[id] = mode
+        Task {
+            do {
+                try await client.requestModeChange(
+                    agentAddress: conversation.agentAddress,
+                    conversation: conversation,
+                    mode: mode.oipPermissionMode
+                ) { [weak self] event in
+                    self?.handleModeEvent(event, conversationID: id)
+                }
+            } catch {
+                pendingModeByConversationID[id] = nil
+                errorMessage = error.localizedDescription
+            }
         }
-        conversation.mode = mode
-        conversation.serverSession = HostedAgentSessionState.applying(
-            mode,
-            to: conversation.serverSession,
-            conversationID: conversation.id
-        )
-        // Integral seconds only: this session feeds `session_sha256`, and CanonicalJSON
-        // serializes non-integral doubles via Swift's own formatting, which is not
-        // guaranteed to match the Python/TS reference implementations byte for byte.
-        conversation.serverSession?["updated"] = .number(Date().timeIntervalSince1970.rounded(.down))
-        upsert(conversation)
+    }
+
+    private func handleModeEvent(_ event: HostedAgentEvent, conversationID id: String) {
+        pendingModeByConversationID[id] = nil
+        switch event {
+        case .modeChanged:
+            deliveryCoordinator.apply(event, toConversationID: id)
+        case .modeChangeFailed(let message):
+            errorMessage = message
+        case .modeChangeTimedOut:
+            errorMessage = "The agent didn't confirm the mode change."
+        default:
+            break
+        }
     }
 }

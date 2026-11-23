@@ -1,4 +1,5 @@
 import Combine
+import ConnectOnionKit
 import Foundation
 
 enum ConversationPersistence {
@@ -23,6 +24,8 @@ final class ConversationState: ObservableObject {
     @Published private(set) var completedUnreadConversationIDs: Set<String> = []
 
     private var draftsByConversationID: [String: String] = [:]
+    /// One Work Room store per conversation, fed from the live frame pipeline. Session-scoped like drafts.
+    private var workRoomStoresByConversationID: [String: WorkRoomStore] = [:]
     private let store: ConversationRepository
 
     init(store: ConversationRepository) {
@@ -49,6 +52,9 @@ final class ConversationState: ObservableObject {
         if case .failure(let error) = snapshotResult {
             persistenceError = error
         }
+
+        let conversationIDs = Set(snapshot.conversations.map(\.id))
+        draftsByConversationID = store.loadDrafts().filter { conversationIDs.contains($0.key) }
     }
 
     var activeAgent: SavedAgent? {
@@ -76,10 +82,22 @@ final class ConversationState: ObservableObject {
     }
 
     func updateActiveDraft(_ draft: String) {
-        guard let activeConversationID else {
+        guard let activeConversationID,
+              draftsByConversationID[activeConversationID, default: ""] != draft else {
             return
         }
-        draftsByConversationID[activeConversationID] = draft
+        draftsByConversationID[activeConversationID] = draft.isEmpty ? nil : draft
+        store.saveDrafts(draftsByConversationID)
+    }
+
+    /// Created on first use, so a view that reads it before the first provider frame observes the same store.
+    func workRoomStore(for conversationID: String) -> WorkRoomStore {
+        if let existing = workRoomStoresByConversationID[conversationID] {
+            return existing
+        }
+        let created = WorkRoomStore()
+        workRoomStoresByConversationID[conversationID] = created
+        return created
     }
 
     func agent(withID id: String) -> SavedAgent? {
@@ -179,6 +197,8 @@ final class ConversationState: ObservableObject {
             }
         }
         draftsByConversationID[conversation.id] = nil
+        store.saveDrafts(draftsByConversationID)
+        workRoomStoresByConversationID[conversation.id] = nil
         failedDeliveryConversationIDs.remove(conversation.id)
         completedUnreadConversationIDs.remove(conversation.id)
         markActiveConversationViewed()
@@ -205,10 +225,12 @@ final class ConversationState: ObservableObject {
 
         for conversationID in deletedConversationIDs {
             draftsByConversationID[conversationID] = nil
+            workRoomStoresByConversationID[conversationID] = nil
             failedDeliveryConversationIDs.remove(conversationID)
             completedUnreadConversationIDs.remove(conversationID)
             recordPersistence(store.deleteConversationResult(id: conversationID))
         }
+        store.saveDrafts(draftsByConversationID)
         markActiveConversationViewed()
         recordPersistence(store.deleteAgentResult(id: agent.id))
         persistSelection()
@@ -279,6 +301,18 @@ final class ConversationState: ObservableObject {
         markActiveConversationViewed()
         recordPersistence(store.upsertConversationResult(conversation))
         persistSelection()
+    }
+
+    /// Stores a conversation (e.g. a fresh server session) without counting as activity:
+    /// no updatedAt bump, no reordering, no agent touch.
+    func replaceWithoutActivity(_ conversation: Conversation) {
+        guard let index = conversations.firstIndex(where: { $0.id == conversation.id }) else {
+            return
+        }
+        var next = conversation
+        next.updatedAt = conversations[index].updatedAt
+        conversations[index] = next
+        recordPersistence(store.upsertConversationResult(next))
     }
 
     func upsert(
