@@ -1,4 +1,5 @@
 import SwiftData
+import ConnectOnionKit
 import XCTest
 @testable import OOChatIOS
 
@@ -140,7 +141,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                 role: .user,
                 content: "ConnectOnion native iOS session is ready.",
                 createdAt: seconds(1003)
-            ),
+            )
         ]
         repository.upsertConversation(conversation)
 
@@ -166,7 +167,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
             ChatMessage(id: "asked", role: .user, content: "hi", createdAt: seconds(1001)),
             ChatMessage(id: "stale", role: .thinking, content: "Waiting…", createdAt: seconds(1002)),
             ChatMessage(id: "tool-run", role: .tool, content: "", createdAt: seconds(1003)),
-            ChatMessage(id: "replied", role: .agent, content: "hello", createdAt: seconds(1004)),
+            ChatMessage(id: "replied", role: .agent, content: "hello", createdAt: seconds(1004))
         ]
         repository.upsertConversation(conversation)
 
@@ -188,7 +189,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                 messages: [
                     LegacyStoredModels.StoredMessage(
                         id: "m1", roleRaw: "user", content: "attached", createdAt: seconds(1001)
-                    ),
+                    )
                 ]
             ))
             // No conversation assigned: an orphan left behind by an older delete path.
@@ -202,6 +203,37 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
 
         XCTAssertEqual(conversations.count, 1)
         XCTAssertEqual(conversations.first?.messages.map(\.id), ["m1"])
+    }
+
+    /// After a force quit, everything comes back unchanged
+    func testRelaunchRestoresTranscriptAndServerSessionFromDisk() throws {
+        let storeURL = try makeScratchStoreURL()
+
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+
+        let repository = try SwiftDataConversationRepository(storeURL: storeURL, defaults: defaults)
+        var conversation = makeConversation(
+            agentID: "a1",
+            address: "0xabc",
+            title: "Relaunch",
+            updatedAt: seconds(1000)
+        )
+
+        conversation.serverSession = ["session_id": .string(conversation.id)]
+        conversation.messages = [
+            ChatMessage(id: "u1", role: .user, content: "run the build", createdAt: seconds(1001)),
+            ChatMessage(id: "r1", role: .agent, content: "Build passed.", createdAt: seconds(1002))
+        ]
+        repository.upsertConversation(conversation)
+
+        let relaunched = try SwiftDataConversationRepository(storeURL: storeURL, defaults: defaults)
+        let restored = try XCTUnwrap(
+            relaunched.load().conversations.first { $0.id == conversation.id }
+        )
+
+        XCTAssertEqual(restored.messages.map(\.id), ["u1", "r1"])
+        XCTAssertEqual(restored.messages.map(\.content), ["run the build", "Build passed."])
+        XCTAssertEqual(restored.serverSession?["session_id"], .string(conversation.id))
     }
 
     func testUpsertsThenLoadRestoresAgentsConversationsAndActiveIDs() throws {
@@ -231,9 +263,9 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
             "plugin_state": .object([
                 "ulw": .object([
                     "turns": .number(100),
-                    "turns_used": .number(7),
-                ]),
-            ]),
+                    "turns_used": .number(7)
+                ])
+            ])
         ]
         repository.upsertConversation(conversation)
 
@@ -368,7 +400,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
         )
         conversation.messages = [
             ChatMessage(id: "tool-1", role: .tool, content: "", toolName: "read", toolState: .running),
-            ChatMessage(id: "user-1", role: .user, content: "Keep me"),
+            ChatMessage(id: "user-1", role: .user, content: "Keep me")
         ]
         repository.upsertConversation(conversation)
 
@@ -569,6 +601,15 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
         XCTAssertNil(repository.load().conversations.first?.serverSession)
     }
 
+    func testIdentityStampRoundTrips() throws {
+        let repository = try makeRepository()
+        var conversation = makeConversation(agentID: "a1", address: "0xaaa", title: "c", updatedAt: seconds(1000))
+        conversation.identityAddress = "0xold"
+        repository.upsertConversation(conversation)
+
+        XCTAssertEqual(repository.load().conversations.first?.identityAddress, "0xold")
+    }
+
     func testEmptyMessagesRoundTrip() throws {
         let repository = try makeRepository()
         var conversation = makeConversation(agentID: "a1", address: "0xaaa", title: "c", updatedAt: seconds(1000))
@@ -596,7 +637,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
             ChatMessage(role: .user, content: "u", createdAt: seconds(1000)),
             ChatMessage(role: .agent, content: "a", createdAt: seconds(1001)),
             ChatMessage(role: .thinking, content: "t", createdAt: seconds(1002)),
-            ChatMessage(role: .error, content: "e", createdAt: seconds(1003)),
+            ChatMessage(role: .error, content: "e", createdAt: seconds(1003))
         ]
         repository.upsertConversation(conversation)
 
@@ -637,7 +678,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
             mimeType: "image/png"
         )
         conversation.messages = [
-            ChatMessage(id: "m1", role: .user, content: "Look", images: [image]),
+            ChatMessage(id: "m1", role: .user, content: "Look", images: [image])
         ]
 
         repository.upsertConversation(conversation)
@@ -662,7 +703,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
             mimeType: "text/plain"
         )
         conversation.messages = [
-            ChatMessage(id: "m1", role: .user, content: "Read this", files: [file]),
+            ChatMessage(id: "m1", role: .user, content: "Read this", files: [file])
         ]
 
         repository.upsertConversation(conversation)
@@ -699,7 +740,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                         roleRaw: "user",
                         content: "hello",
                         createdAt: seconds(1001)
-                    ),
+                    )
                 ]
             )
             context.insert(seededV1)
@@ -752,7 +793,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                         content: "look",
                         createdAt: seconds(1001),
                         imageAttachmentsData: try JSONEncoder().encode([image])
-                    ),
+                    )
                 ]
             )
             context.insert(seededV2)
@@ -769,6 +810,66 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
         XCTAssertEqual(message?.id, "v2-message")
         XCTAssertEqual(message?.images, [image])
         XCTAssertEqual(message?.files, [])
+    }
+
+    func testV4StoreMigratesWithNoIdentityStamp() throws {
+        let storeURL = try makeScratchStoreURL()
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+
+        do {
+            let schema = Schema(versionedSchema: StoredModelsSchemaV4.self)
+            let container = try ModelContainer(for: schema, configurations: ModelConfiguration(url: storeURL))
+            let context = ModelContext(container)
+            context.insert(StoredModelsSchemaV4.StoredConversation(
+                id: "v4-conversation",
+                title: "Before stamps",
+                agentID: nil,
+                agentAddress: "0xaaa",
+                modeRaw: "safe",
+                createdAt: seconds(1000),
+                updatedAt: seconds(1001),
+                serverSessionData: nil,
+                messages: []
+            ))
+            try context.save()
+        }
+
+        let repository = try SwiftDataConversationRepository(storeURL: storeURL, defaults: defaults)
+        let conversation = repository.load().conversations.first
+
+        XCTAssertEqual(conversation?.id, "v4-conversation")
+        XCTAssertNil(conversation?.identityAddress)
+    }
+
+    func testV5StoreMigratesWithNoTombstones() throws {
+        let storeURL = try makeScratchStoreURL()
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+
+        do {
+            let schema = Schema(versionedSchema: StoredModelsSchemaV5.self)
+            let container = try ModelContainer(for: schema, configurations: ModelConfiguration(url: storeURL))
+            let context = ModelContext(container)
+            context.insert(StoredModelsSchemaV5.StoredConversation(
+                id: "v5-conversation",
+                title: "Before tombstones",
+                agentID: nil,
+                agentAddress: "0xaaa",
+                modeRaw: "safe",
+                createdAt: seconds(1000),
+                updatedAt: seconds(1001),
+                serverSessionData: nil,
+                identityAddress: "0xold",
+                messages: []
+            ))
+            try context.save()
+        }
+
+        let repository = try SwiftDataConversationRepository(storeURL: storeURL, defaults: defaults)
+        let conversation = repository.load().conversations.first
+
+        XCTAssertEqual(conversation?.id, "v5-conversation")
+        XCTAssertEqual(conversation?.identityAddress, "0xold")
+        XCTAssertNil(conversation?.tombstoneUpdated)
     }
 
     func testMessagesWithSameIDInDifferentConversationsBothSurvive() throws {
@@ -802,7 +903,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
             ("12", "x"),
             ("1", "2#x"),
             ("Café", "résumé"),
-            ("Caf", "é#résumé"),
+            ("Caf", "é#résumé")
         ]
 
         let ids = pairs.map { StoredMessage.compositeID(conversationID: $0.conversation, messageID: $0.message) }
@@ -946,7 +1047,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
             updatedAt: seconds(1000)
         )
         conversation.messages = [
-            ChatMessage(id: "m1", role: .user, content: "café", createdAt: seconds(1001)),
+            ChatMessage(id: "m1", role: .user, content: "café", createdAt: seconds(1001))
         ]
         repository.upsertAgent(SavedAgent(id: "a1", address: "0xabc"))
         repository.upsertConversation(conversation)
@@ -975,7 +1076,7 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
         let schema = Schema([
             LegacyStoredModels.StoredAgent.self,
             LegacyStoredModels.StoredConversation.self,
-            LegacyStoredModels.StoredMessage.self,
+            LegacyStoredModels.StoredMessage.self
         ])
         let container = try ModelContainer(for: schema, configurations: ModelConfiguration(url: storeURL))
         let context = ModelContext(container)
@@ -1003,14 +1104,14 @@ final class SwiftDataConversationRepositoryTests: XCTestCase {
                 createdAt: seconds(1000), updatedAt: seconds(2000), serverSessionData: nil,
                 messages: [
                     LegacyStoredModels.StoredMessage(id: "m1", roleRaw: "user", content: "hello", createdAt: seconds(1001)),
-                    LegacyStoredModels.StoredMessage(id: "m2", roleRaw: "agent", content: "world", createdAt: seconds(1002)),
+                    LegacyStoredModels.StoredMessage(id: "m2", roleRaw: "agent", content: "world", createdAt: seconds(1002))
                 ]
             ))
             context.insert(LegacyStoredModels.StoredConversation(
                 id: "c2", title: "second", agentID: "a1", agentAddress: "0xaaa", modeRaw: "plan",
                 createdAt: seconds(3000), updatedAt: seconds(3000), serverSessionData: nil,
                 messages: [
-                    LegacyStoredModels.StoredMessage(id: "m3", roleRaw: "tool", content: "tool ran", createdAt: seconds(3001)),
+                    LegacyStoredModels.StoredMessage(id: "m3", roleRaw: "tool", content: "tool ran", createdAt: seconds(3001))
                 ]
             ))
         }
@@ -1041,7 +1142,7 @@ final class ConversationRepositoryErrorMessageTests: XCTestCase {
             .deleteConversation: "It may reappear when you reopen the app.",
             .saveAgent: "This agent may be missing when you reopen the app.",
             .deleteAgent: "It may reappear when you reopen the app.",
-            .search: "Some results may be missing.",
+            .search: "Some results may be missing."
         ]
 
         for (operation, consequence) in expectedConsequences {

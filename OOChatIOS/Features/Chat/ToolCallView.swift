@@ -1,4 +1,23 @@
 import SwiftUI
+import ConnectOnionKit
+
+private struct ToolAwaitingApprovalKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+extension EnvironmentValues {
+    /// The tool the open approval card asks about. Its row shows Awaiting approval, not Running.
+    var toolAwaitingApprovalID: String? {
+        get { self[ToolAwaitingApprovalKey.self] }
+        set { self[ToolAwaitingApprovalKey.self] = newValue }
+    }
+}
+
+private extension ToolCallState {
+    func rowState(isAwaitingApproval: Bool) -> ToolRowState {
+        self == .running && isAwaitingApproval ? .awaitingApproval : rowState
+    }
+}
 
 enum ToolCallPresentation {
     case standalone
@@ -9,12 +28,12 @@ struct ToolCallView: View {
     let message: ChatMessage
     var presentation: ToolCallPresentation = .standalone
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.toolAwaitingApprovalID) private var awaitingApprovalID
     @State private var isExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             headerButton
-
             if isExpanded {
                 Divider()
                     .padding(.leading, dividerInset)
@@ -24,7 +43,12 @@ struct ToolCallView: View {
                         detail(label: "Input", value: argumentsDescription)
                     }
 
-                    if !message.content.isEmpty {
+                    if let note = settledNote {
+                        // The host's "User rejected…" text is written for the agent, not you.
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(OOColor.inkSecondary)
+                    } else if !message.content.isEmpty {
                         detail(
                             label: toolState == .failed ? "Error" : "Result",
                             value: message.content,
@@ -39,7 +63,7 @@ struct ToolCallView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            presentation == .standalone ? Color(.secondarySystemBackground) : Color.clear,
+            presentation == .standalone ? OOColor.surface : Color.clear,
             in: RoundedRectangle(cornerRadius: ToolCallMetrics.cornerRadius, style: .continuous)
         )
         .overlay(
@@ -62,14 +86,12 @@ struct ToolCallView: View {
         } label: {
             HStack(spacing: ToolCallMetrics.headerSpacing) {
                 statusIcon
-
                 headerCopy
 
                 Spacer(minLength: ToolCallMetrics.minimumTrailingSpacing)
-
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OOColor.inkSecondary)
                     .frame(width: ToolCallMetrics.chevronWidth)
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     .accessibilityHidden(true)
@@ -96,7 +118,7 @@ struct ToolCallView: View {
         if presentation == .grouped {
             Text(summary)
                 .font(.subheadline.weight(.medium))
-                .foregroundStyle(.primary)
+                .foregroundStyle(OOColor.ink)
                 .lineLimit(1)
                 .truncationMode(.middle)
         } else {
@@ -104,16 +126,16 @@ struct ToolCallView: View {
                 if toolState == .completed {
                     Text(toolTitle)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(OOColor.inkSecondary)
                 } else {
                     HStack(spacing: 5) {
                         Text(toolTitle)
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(OOColor.inkSecondary)
 
                         Text("·")
                             .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(OOColor.inkTertiary)
 
                         Text(statusLabel)
                             .font(.caption.weight(.medium))
@@ -121,16 +143,14 @@ struct ToolCallView: View {
                     }
                     .lineLimit(1)
                 }
-
                 Text(summary)
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(OOColor.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
         }
     }
-
     private var argumentsDescription: String {
         ToolActionSummary.argumentsDescription(message.toolArguments ?? [:])
     }
@@ -148,40 +168,41 @@ struct ToolCallView: View {
         message.toolState ?? .running
     }
 
+    private var rowState: ToolRowState {
+        toolState.rowState(isAwaitingApproval: message.id == awaitingApprovalID)
+    }
+
+    private var settledNote: String? {
+        switch toolState {
+        case .skipped:
+            return "You skipped this tool."
+        case .interrupted where message.content.isEmpty:
+            return "Stopped before it finished."
+        default:
+            return nil
+        }
+    }
+
     private var statusIcon: some View {
         ToolCallStatusIcon(
-            state: toolState,
+            state: rowState,
             completedSystemName: ToolCallIconography.systemName(for: message),
             size: iconSize
         )
     }
 
     private var statusLabel: String {
-        switch toolState {
-        case .running:
-            return "Running"
-        case .completed:
-            return "Completed"
-        case .failed:
-            return "Failed"
-        }
+        rowState.label
     }
 
     private var statusTint: Color {
-        switch toolState {
-        case .running:
-            return AppTheme.primary
-        case .completed:
-            return Color(.secondaryLabel)
-        case .failed:
-            return AppTheme.destructive
-        }
+        toolState == .failed ? AppTheme.destructive : rowState.tint
     }
 
     private var borderColor: Color {
         toolState == .failed
             ? AppTheme.destructive.opacity(0.24)
-            : Color(.separator).opacity(0.18)
+            : OOColor.hairline
     }
 
     private var headerHorizontalPadding: CGFloat {
@@ -210,12 +231,26 @@ struct ToolCallView: View {
 struct ToolCallGroupView: View {
     let messages: [ChatMessage]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isExpanded = true
+    @Environment(\.toolAwaitingApprovalID) private var awaitingApprovalID
+
+    // Open while a tool is still running so the person can watch it, then folded to one
+    // line when the last result arrives. Once the person opens or closes the group
+    // themselves, their choice stays.
+    @State private var isExpanded: Bool
+    @State private var hasBeenToggledByHand = false
+
+    init(messages: [ChatMessage]) {
+        self.messages = messages
+        _isExpanded = State(initialValue: Self.hasRunningTool(in: messages))
+    }
+
+    private static func hasRunningTool(in messages: [ChatMessage]) -> Bool {
+        messages.contains { ($0.toolState ?? .running) == .running }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             groupHeader
-
             if isExpanded {
                 Divider()
                     .padding(.leading, ToolCallGroupMetrics.dividerInset)
@@ -237,7 +272,7 @@ struct ToolCallGroupView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            Color(.secondarySystemBackground),
+            OOColor.surface,
             in: RoundedRectangle(cornerRadius: ToolCallGroupMetrics.cornerRadius, style: .continuous)
         )
         .overlay(
@@ -248,30 +283,37 @@ struct ToolCallGroupView: View {
             RoundedRectangle(cornerRadius: ToolCallGroupMetrics.cornerRadius, style: .continuous)
         )
         .animation(AppMotion.stateChange(reduceMotion: reduceMotion), value: statusSignature)
+        .onChange(of: Self.hasRunningTool(in: messages)) { _, isRunning in
+            guard !hasBeenToggledByHand else {
+                return
+            }
+            withAnimation(AppMotion.stateChange(reduceMotion: reduceMotion)) {
+                isExpanded = isRunning
+            }
+        }
         .accessibilityIdentifier("toolCallGroup.\(messages.first?.id ?? "unknown")")
     }
 
     private var groupHeader: some View {
         Button {
+            hasBeenToggledByHand = true
             withAnimation(AppMotion.stateChange(reduceMotion: reduceMotion)) {
                 isExpanded.toggle()
             }
         } label: {
             HStack(spacing: ToolCallGroupMetrics.headerSpacing) {
                 groupStatusIcon
-
-                Text(ToolCallGroupSummary.title(for: messages))
+                Text(title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(OOColor.ink)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                     .contentTransition(.opacity)
 
                 Spacer(minLength: ToolCallGroupMetrics.minimumTrailingSpacing)
-
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OOColor.inkSecondary)
                     .frame(width: ToolCallGroupMetrics.chevronWidth)
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     .accessibilityHidden(true)
@@ -281,7 +323,7 @@ struct ToolCallGroupView: View {
             .padding(.vertical, ToolCallGroupMetrics.headerVerticalPadding)
         }
         .buttonStyle(AppPressButtonStyle(pressedScale: 0.99, pressedOpacity: 0.90))
-        .accessibilityLabel(ToolCallGroupSummary.title(for: messages))
+        .accessibilityLabel(title)
         .accessibilityValue(isExpanded ? "expanded" : "collapsed")
         .accessibilityHint(isExpanded ? "Collapses tool activity" : "Shows each tool call")
     }
@@ -294,32 +336,37 @@ struct ToolCallGroupView: View {
         )
     }
 
-    private var aggregateState: ToolCallState {
-        if messages.contains(where: { ($0.toolState ?? .running) == .running }) {
-            return .running
+    private var rowStates: [ToolRowState] {
+        messages.map {
+            ($0.toolState ?? .running).rowState(isAwaitingApproval: $0.id == awaitingApprovalID)
         }
-        if messages.contains(where: { $0.toolState == .failed }) {
-            return .failed
-        }
-        return .completed
+    }
+
+    /// The most urgent state among the rows (shared order, ToolRowState.summary).
+    private var aggregateState: ToolRowState {
+        ToolRowState.summary(of: rowStates) ?? .completed
+    }
+
+    /// "Waiting for your approval" or "Running N tools" while open, else what the tools did.
+    private var title: String {
+        ToolRowState.groupTitle(for: rowStates) ?? ToolCallGroupSummary.title(for: messages)
     }
 
     private var groupBorderColor: Color {
         aggregateState == .failed
             ? AppTheme.destructive.opacity(0.24)
-            : Color(.separator).opacity(0.18)
+            : OOColor.hairline
     }
 
     private var statusSignature: String {
-        messages.map { $0.toolState?.rawValue ?? "running" }.joined(separator: "|")
+        rowStates.map(\.rawValue).joined(separator: "|")
     }
 }
 
 private struct ToolCallStatusIcon: View {
-    let state: ToolCallState
+    let state: ToolRowState
     let completedSystemName: String
     let size: CGFloat
-
     var body: some View {
         ZStack {
             statusGlyph
@@ -337,15 +384,19 @@ private struct ToolCallStatusIcon: View {
         case .running:
             ProgressView()
                 .controlSize(.small)
-                .tint(AppTheme.primary)
+                .tint(OOColor.primary)
         case .completed:
             Image(systemName: completedSystemName)
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color(.secondaryLabel))
+                .foregroundStyle(OOColor.inkSecondary)
         case .failed:
             Image(systemName: "exclamationmark.circle.fill")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(AppTheme.destructive)
+        case .awaitingApproval, .interrupted, .skipped:
+            Image(systemName: state.systemImage ?? "circle")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(state.tint)
         }
     }
 }
@@ -353,7 +404,6 @@ private struct ToolCallStatusIcon: View {
 private enum ToolCallIconography {
     static func systemName(for message: ChatMessage?) -> String {
         let name = (message?.toolName ?? "").lowercased()
-
         if name.contains("edit") || name.contains("patch") || name.contains("write") {
             return "pencil"
         }
@@ -386,7 +436,6 @@ enum ToolCallGroupSummary {
 
         var orderedCategories: [Category] = []
         var counts: [Category: Int] = [:]
-
         for message in messages {
             let category = category(for: message)
             if counts[category] == nil {
@@ -412,7 +461,6 @@ enum ToolCallGroupSummary {
 
     private static func category(for message: ChatMessage) -> Category {
         let name = (message.toolName ?? "").lowercased()
-
         if name.contains("edit") || name.contains("patch") || name.contains("write") {
             return .editedFiles
         }
@@ -461,7 +509,6 @@ enum ToolCallGroupSummary {
         default:
             joined = "\(phrases.dropLast().joined(separator: ", ")), and \(phrases.last!)"
         }
-
         return joined.prefix(1).uppercased() + String(joined.dropFirst())
     }
 }
@@ -471,11 +518,10 @@ private extension ToolCallView {
         VStack(alignment: .leading, spacing: 5) {
             Text(label)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(isError ? AppTheme.destructive : Color.secondary)
-
+                .foregroundStyle(isError ? AppTheme.destructive : OOColor.inkSecondary)
             Text(value)
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(isError ? AppTheme.destructive : Color.primary)
+                .foregroundStyle(isError ? AppTheme.destructive : OOColor.ink)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -483,7 +529,7 @@ private extension ToolCallView {
                 .background(
                     isError
                         ? AppTheme.destructive.opacity(0.07)
-                        : Color(.tertiarySystemBackground),
+                        : OOColor.paper,
                     in: RoundedRectangle(cornerRadius: ToolCallMetrics.codeCornerRadius, style: .continuous)
                 )
         }
@@ -491,7 +537,7 @@ private extension ToolCallView {
 }
 
 private enum ToolCallMetrics {
-    static let cornerRadius: CGFloat = 14
+    static let cornerRadius: CGFloat = OORadius.card
     static let borderWidth: CGFloat = 0.5
     static let headerSpacing: CGFloat = 11
     static let horizontalPadding: CGFloat = 12
@@ -505,11 +551,11 @@ private enum ToolCallMetrics {
     static let detailPadding: CGFloat = 12
     static let detailVerticalPadding: CGFloat = 10
     static let codePadding: CGFloat = 10
-    static let codeCornerRadius: CGFloat = 10
+    static let codeCornerRadius: CGFloat = OORadius.large
 }
 
 private enum ToolCallGroupMetrics {
-    static let cornerRadius: CGFloat = 14
+    static let cornerRadius: CGFloat = OORadius.card
     static let borderWidth: CGFloat = 0.5
     static let headerSpacing: CGFloat = 11
     static let headerHorizontalPadding: CGFloat = 12

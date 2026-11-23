@@ -1,4 +1,6 @@
 import Combine
+import ConnectOnionKit
+import Foundation
 import XCTest
 @testable import OOChatIOS
 
@@ -30,6 +32,25 @@ final class NetworkRecoveryTests: XCTestCase {
         XCTAssertTrue(transport.connectedAddresses.isEmpty)
     }
 
+    // Story 182: named once by the first real message, never by a slash command.
+    func testAChatIsNamedByItsFirstRealMessageNotASlashCommand() {
+        let (viewModel, _, monitor) = makeEnvironment()
+        _ = setUpAgentAndConversation(viewModel)
+        monitor.simulate(online: false)
+
+        viewModel.prompt = "/hello"
+        viewModel.sendPrompt()
+        XCTAssertEqual(viewModel.activeConversation?.title, "New chat")
+
+        viewModel.prompt = "Fix the parser\nIt crashes on empty input"
+        viewModel.sendPrompt()
+        XCTAssertEqual(viewModel.activeConversation?.title, "Fix the parser")
+
+        viewModel.prompt = "List my home directory"
+        viewModel.sendPrompt()
+        XCTAssertEqual(viewModel.activeConversation?.title, "Fix the parser", "named once")
+    }
+
     // queueing while offline
     func testSendWhileOfflineQueuesMessageWithoutNetworkCall() {
         let (viewModel, transport, monitor) = makeEnvironment()
@@ -46,6 +67,24 @@ final class NetworkRecoveryTests: XCTestCase {
         XCTAssertFalse(messages.contains { $0.role == .thinking })
         XCTAssertTrue(transport.sentPrompts.isEmpty)
         XCTAssertFalse(viewModel.isProcessing)
+    }
+
+    func testAMessageQueuedBeforeTheAgentWasKnownAsAStationIsNeverSentToIt() async {
+        let (viewModel, transport, monitor) = makeEnvironment()
+        let agent = setUpAgentAndConversation(viewModel)
+        monitor.simulate(online: false)
+        viewModel.prompt = "queued while offline"
+        viewModel.sendPrompt()
+
+        ChatViewModel.rememberStationAddress(agent.address)
+        defer { UserDefaults.standard.removeObject(forKey: "ClaudeStationAddresses") }
+        monitor.simulate(online: true)
+        await viewModel.recoveryTask?.value
+        await viewModel.flushQueuedMessages()
+
+        XCTAssertTrue(transport.sentPrompts.isEmpty)
+        let userMessage = viewModel.activeConversation?.messages.last { $0.role == .user }
+        XCTAssertEqual(userMessage?.deliveryState, .queued)
     }
 
     func testMultipleOfflineSendsQueueInOrder() {
@@ -79,11 +118,19 @@ final class NetworkRecoveryTests: XCTestCase {
 
         XCTAssertEqual(transport.sentPrompts, ["first"])
         XCTAssertTrue(viewModel.isProcessing)
+        // "first" has gone to the host, so it is .transmitted, never .queued (which would resend it).
+        func firstState() -> MessageDeliveryState? {
+            viewModel.activeConversation?.messages.first { $0.content == "first" }?.deliveryState
+        }
+        for _ in 0..<100 where firstState() != .transmitted {
+            await Task.yield()
+        }
+        XCTAssertEqual(firstState(), .transmitted)
         XCTAssertEqual(
             viewModel.activeConversation?.messages.filter {
                 $0.role == .user && $0.deliveryState == .queued
             }.map(\.content),
-            ["first", "second"]
+            ["second"]
         )
 
         await firstGate.open()
@@ -103,7 +150,7 @@ final class NetworkRecoveryTests: XCTestCase {
         let secondGate = PromptGate()
         transport.sendBehaviorsByPrompt = [
             "first": .wait(gate: firstGate, output: "first reply"),
-            "second": .wait(gate: secondGate, output: "second reply"),
+            "second": .wait(gate: secondGate, output: "second reply")
         ]
 
         viewModel.prompt = "first"
@@ -218,7 +265,7 @@ final class NetworkRecoveryTests: XCTestCase {
         let backgroundGate = PromptGate()
         transport.sendBehaviorsByPrompt = [
             "background": .wait(gate: backgroundGate, output: "background reply"),
-            "active": .waitUntilCancelled,
+            "active": .waitUntilCancelled
         ]
 
         viewModel.prompt = "background"
@@ -340,7 +387,9 @@ final class NetworkRecoveryTests: XCTestCase {
         let userMessage = messages.last { $0.role == .user }
         XCTAssertEqual(userMessage?.deliveryState, .failed)
         XCTAssertFalse(messages.contains { $0.role == .thinking })
-        XCTAssertNotNil(viewModel.errorMessage)
+        // The reason goes on the message, not in a banner.
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertEqual(userMessage.flatMap { viewModel.failureByMessageID[$0.id] }, .timedOut)
         XCTAssertEqual(viewModel.connectionState, .disconnected)
         XCTAssertFalse(viewModel.isProcessing)
     }
@@ -414,14 +463,16 @@ final class NetworkRecoveryTests: XCTestCase {
         XCTAssertEqual(userMessage?.deliveryState, .failed, "the failure still reaches the user on the bubble")
     }
 
-    func testGoingOfflineRetractsAConnectionErrorRaisedFirst() async {
+    func testADroppedSendShowsOnTheMessageNotABanner() async {
         let (viewModel, transport, monitor) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         transport.sendBehavior = .fail(HostedAgentClientError.closed)
         viewModel.prompt = "will drop"
         viewModel.sendPrompt()
         await viewModel.sendTask?.value
-        XCTAssertNotNil(viewModel.errorMessage, "nothing knows the network is gone yet")
+        XCTAssertNil(viewModel.errorMessage, "the failed message says why; the header offers Retry")
+        let failed = (viewModel.activeConversation?.messages ?? []).last { $0.role == .user }
+        XCTAssertEqual(failed.flatMap { viewModel.failureByMessageID[$0.id] }, .connectionClosed)
 
         monitor.simulate(online: false)
 
@@ -439,7 +490,7 @@ final class NetworkRecoveryTests: XCTestCase {
         XCTAssertEqual(viewModel.errorMessage, "That photo is larger than 10 MB.")
     }
 
-    func testAgentReportedFailureWhileOfflineStillRaisesABanner() async {
+    func testAgentReportedFailureShowsOnTheMessage() async {
         let (viewModel, transport, monitor) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         let gate = PromptGate()
@@ -454,10 +505,10 @@ final class NetworkRecoveryTests: XCTestCase {
         await gate.open()
         await viewModel.sendTask?.value
 
-        XCTAssertTrue(
-            viewModel.errorMessage?.contains("out of disk") ?? false,
-            "an agent-side failure says something the offline banner does not"
-        )
+        XCTAssertNil(viewModel.errorMessage)
+        let failed = (viewModel.activeConversation?.messages ?? []).last { $0.role == .user }
+        let reason = failed.flatMap { viewModel.failure(forMessageID: $0.id)?.reason }
+        XCTAssertTrue(reason?.contains("out of disk") ?? false, "an agent-side failure says what the agent said")
     }
 
     func testRetryResendsFailedMessage() async {
@@ -480,6 +531,7 @@ final class NetworkRecoveryTests: XCTestCase {
         XCTAssertTrue(messages.contains { $0.role == .agent && $0.content == "recovered" })
         XCTAssertEqual(transport.sentPrompts, ["flaky", "flaky"])
         XCTAssertNil(viewModel.errorMessage)
+        XCTAssertNil(viewModel.failureByMessageID[failed.id], "a retry clears the old reason")
     }
 
     func testRetryWhileOfflineRequeuesForLaterFlush() async {
@@ -590,7 +642,7 @@ final class NetworkRecoveryTests: XCTestCase {
                 name: "read_file",
                 output: "# Project notes",
                 state: .completed
-            ),
+            )
         ]
         transport.sendBehavior = .succeed(output: "I found the project notes.")
 
@@ -623,7 +675,7 @@ final class NetworkRecoveryTests: XCTestCase {
                 name: "read_file",
                 output: "Background output",
                 state: .completed
-            ),
+            )
         ]
 
         viewModel.prompt = "Run in the background"
@@ -890,7 +942,7 @@ final class NetworkRecoveryTests: XCTestCase {
                 id: "question-1",
                 question: "Which environment?",
                 options: ["Staging", "Production"]
-            ),
+            )
         ]
 
         viewModel.prompt = "Deploy the app"
@@ -912,7 +964,7 @@ final class NetworkRecoveryTests: XCTestCase {
         let (viewModel, transport, _) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         transport.askUserRequests = [
-            AskUserRequest(id: "question-1", question: "Continue?", options: ["Yes", "No"]),
+            AskUserRequest(id: "question-1", question: "Continue?", options: ["Yes", "No"])
         ]
         transport.waitAfterInteractionsUntilCancelled = true
 
@@ -935,7 +987,7 @@ final class NetworkRecoveryTests: XCTestCase {
         setUpAgentAndConversation(viewModel)
         let conversation = viewModel.activeConversation!
         transport.askUserRequests = [
-            AskUserRequest(id: "question-1", question: "Continue?", options: ["Yes", "No"]),
+            AskUserRequest(id: "question-1", question: "Continue?", options: ["Yes", "No"])
         ]
         transport.waitAfterInteractionsUntilCancelled = true
 
@@ -958,7 +1010,7 @@ final class NetworkRecoveryTests: XCTestCase {
         let agent = setUpAgentAndConversation(viewModel)
         let questionConversation = viewModel.activeConversation!
         transport.askUserRequests = [
-            AskUserRequest(id: "question-1", question: "Continue?", options: ["Yes", "No"]),
+            AskUserRequest(id: "question-1", question: "Continue?", options: ["Yes", "No"])
         ]
 
         viewModel.prompt = "Start task"
@@ -1026,6 +1078,7 @@ final class NetworkRecoveryTests: XCTestCase {
             let (viewModel, transport, _) = makeEnvironment()
             setUpAgentAndConversation(viewModel)
             viewModel.setMode(mode)
+            await viewModel.settleModeChange()
             transport.approvalRequests = [approvalRequest(tool: "credit_card_charge")]
 
             viewModel.prompt = "Charge the card"
@@ -1041,34 +1094,36 @@ final class NetworkRecoveryTests: XCTestCase {
         }
     }
 
-    func testSelectingUlwDoesNotForgeServerOwnedCapabilityState() {
-        let (viewModel, _, _) = makeEnvironment()
+    func testSelectingUlwDoesNotForgeServerOwnedCapabilityState() async {
+        let (viewModel, transport, _) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
-        // Floored: the signed payload carries whole seconds so CanonicalJSON stays
-        // byte-identical to the Python/TS reference implementations.
-        let selectedAt = Date().timeIntervalSince1970.rounded(.down)
 
         viewModel.setMode(.ulw)
+        // Nothing changes on the device until the host confirms.
+        XCTAssertEqual(viewModel.activeMode, .safe)
+        XCTAssertNil(viewModel.activeConversation?.serverSession?["mode"])
+        await viewModel.settleModeChange()
 
+        XCTAssertEqual(transport.requestedModes, [.fullAccess])
         let session = viewModel.activeConversation?.serverSession
         XCTAssertEqual(session?["mode"], .string("ulw"))
         XCTAssertNil(session?["skip_tool_approval"])
         XCTAssertNil(session?["ulw_turns"])
         XCTAssertNil(session?["ulw_turns_used"])
-        let updated = session?["updated"]?.numberValue ?? 0
-        XCTAssertGreaterThanOrEqual(updated, selectedAt)
-        XCTAssertEqual(updated, updated.rounded(.down))
+        XCTAssertNil(session?["updated"])
     }
 
-    func testLeavingUlwClearsAutonomousSessionState() {
+    func testLeavingUlwClearsAutonomousSessionState() async {
         let (viewModel, _, _) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         viewModel.setMode(.ulw)
+        await viewModel.settleModeChange()
         var conversation = viewModel.activeConversation!
         conversation.serverSession?["skip_tool_approval"] = .bool(true)
         viewModel.upsertForTesting(conversation)
 
         viewModel.setMode(.safe)
+        await viewModel.settleModeChange()
 
         let session = viewModel.activeConversation?.serverSession
         XCTAssertEqual(session?["mode"], .string("safe"))
@@ -1081,7 +1136,9 @@ final class NetworkRecoveryTests: XCTestCase {
         let (viewModel, transport, _) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         viewModel.setMode(.ulw)
-        transport.streamedEvents = [.modeChanged(.safe)]
+        await viewModel.settleModeChange()
+        XCTAssertEqual(viewModel.activeMode, .ulw)
+        transport.streamedEvents = [.modeChanged(mode: .auto, turnsLeft: nil)]
 
         viewModel.prompt = "Keep working"
         viewModel.sendPrompt()
@@ -1094,7 +1151,7 @@ final class NetworkRecoveryTests: XCTestCase {
     func testApprovalSupportsStopAndExplain() async {
         for expected in [
             ApprovalDecision.rejectHard(feedback: nil),
-            ApprovalDecision.rejectExplain(feedback: nil),
+            ApprovalDecision.rejectExplain(feedback: nil)
         ] {
             let (viewModel, transport, _) = makeEnvironment()
             setUpAgentAndConversation(viewModel)
@@ -1120,6 +1177,7 @@ final class NetworkRecoveryTests: XCTestCase {
         let (viewModel, transport, _) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         viewModel.setMode(.ulw)
+        await viewModel.settleModeChange()
         transport.ulwCheckpoints = [UlwCheckpointRequest(turnsUsed: 100, maxTurns: 100)]
 
         viewModel.prompt = "Keep working"
@@ -1138,6 +1196,7 @@ final class NetworkRecoveryTests: XCTestCase {
         let (viewModel, transport, _) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         viewModel.setMode(.ulw)
+        await viewModel.settleModeChange()
         transport.ulwCheckpoints = [UlwCheckpointRequest(turnsUsed: 100, maxTurns: 100)]
 
         viewModel.prompt = "Keep working"
@@ -1145,15 +1204,18 @@ final class NetworkRecoveryTests: XCTestCase {
         await waitForUlwCheckpoint(on: viewModel)
         viewModel.switchModeFromUlwCheckpoint(id: viewModel.activePendingUlwCheckpoint!.id, to: .accept)
         await viewModel.sendTask?.value
+        await viewModel.settleModeChange()
 
         XCTAssertEqual(transport.ulwDecisions, [.switchMode(.accept)])
-        XCTAssertEqual(viewModel.activeMode, .accept)
+        // accept_edits is auto on the wire, and a confirmed auto reads back as .safe.
+        XCTAssertEqual(viewModel.activeMode, .safe)
     }
 
     func testPlanReviewWaitsForApproval() async {
         let (viewModel, transport, _) = makeEnvironment()
         setUpAgentAndConversation(viewModel)
         viewModel.setMode(.plan)
+        await viewModel.settleModeChange()
         transport.planReviews = [PlanReviewRequest(planContent: "# Plan")]
 
         viewModel.prompt = "Plan the change"
@@ -1542,102 +1604,166 @@ final class NetworkRecoveryTests: XCTestCase {
         return (viewModel, transport, monitor)
     }
 
-    func testSlashPickerLoadsSortsAndFiltersServerSkills() async {
-        let (viewModel, transport, _) = makeEnvironment()
-        setUpAgentAndConversation(viewModel)
-        transport.availableSkills = [
-            AgentSkill(name: "Review", description: "Review current changes"),
-            AgentSkill(name: "commit", description: "Create a commit"),
-            AgentSkill(name: "release", description: "Prepare a release"),
+    private func makeAgentProfile(
+        address: String,
+        skills: [(name: String, description: String)] = [],
+        balance: Double? = 2.0
+    ) -> OIPAgentProfile {
+        var frame: [String: JSONValue] = [
+            "type": .string("AGENT_PROFILE"),
+            "address": .string(address),
+            "name": .string("Test Agent"),
+            "skills": .array(
+                skills.map { skill in
+                    .object([
+                        "name": .string(skill.name),
+                        "description": .string(skill.description)
+                    ])
+                }
+            )
         ]
 
-        viewModel.prompt = "/"
-        viewModel.promptDidChange()
-        await waitForSkillFetch(on: viewModel, transport: transport)
-
-        XCTAssertEqual(viewModel.slashSkillSuggestions.map(\.name), ["commit", "release", "Review"])
-        XCTAssertTrue(viewModel.shouldShowSlashSkillPicker)
-
-        viewModel.prompt = "/RE"
-        viewModel.promptDidChange()
-        XCTAssertEqual(viewModel.slashSkillSuggestions.map(\.name), ["release", "Review"])
-
-        viewModel.prompt = "/review details"
-        viewModel.promptDidChange()
-        XCTAssertTrue(viewModel.slashSkillSuggestions.isEmpty)
-        XCTAssertFalse(viewModel.shouldShowSlashSkillPicker)
-        XCTAssertEqual(transport.fetchedSkillAddresses.count, 1)
-    }
-
-    func testSkillLoadingPublishesThroughViewModelFacade() async {
-        let (viewModel, transport, _) = makeEnvironment()
-        setUpAgentAndConversation(viewModel)
-        transport.availableSkills = [AgentSkill(name: "review")]
-        viewModel.prompt = "/"
-        var didPublish = false
-        let cancellable = viewModel.objectWillChange.sink {
-            didPublish = true
+        if let balance {
+            frame["balance_usd"] = .number(balance)
         }
 
-        viewModel.promptDidChange()
-        await waitForSkillFetch(on: viewModel, transport: transport)
+        guard case .agentProfile(let profile) = OIPServerFrame.decode(frame) else {
+            fatalError("Failed to decode test AGENT_PROFILE")
+        }
 
-        XCTAssertTrue(didPublish)
-        withExtendedLifetime(cancellable) {}
+        return profile
     }
 
-    func testSelectingSlashSkillInsertsCommandWithArgumentSpace() async {
-        let (viewModel, transport, _) = makeEnvironment()
-        setUpAgentAndConversation(viewModel)
-        transport.availableSkills = [AgentSkill(name: "commit", description: "Create a commit")]
-        viewModel.prompt = "/"
-        viewModel.promptDidChange()
-        await waitForSkillFetch(on: viewModel, transport: transport)
+    func testSlashPickerUsesSkillsFromAgentProfile() {
+        let coordinator = SkillLoadingCoordinator()
 
-        viewModel.selectSlashSkill(viewModel.slashSkillSuggestions[0])
+        let profile = makeAgentProfile(
+            address: address,
+            skills: [
+                (name: "Review", description: "Review current changes"),
+                (name: "commit", description: "Create a commit"),
+                (name: "release", description: "Prepare a release")
+            ]
+        )
+
+        coordinator.updateProfile(profile, for: address)
+
+        XCTAssertEqual(
+            coordinator.suggestions(prompt: "/", agentAddress: address).map(\.name),
+            ["Review", "commit", "release"]
+        )
+
+        XCTAssertTrue(
+            coordinator.shouldShowSuggestions(prompt: "/", agentAddress: address)
+        )
+    }
+
+    func testSlashPickerFiltersSkillsFromAgentProfile() {
+        let coordinator = SkillLoadingCoordinator()
+
+        let profile = makeAgentProfile(
+            address: address,
+            skills: [
+                (name: "review", description: "Review changes"),
+                (name: "release", description: "Prepare release"),
+                (name: "commit", description: "Create commit")
+            ]
+        )
+
+        coordinator.updateProfile(profile, for: address)
+
+        let suggestions = coordinator.suggestions(
+            prompt: "/rev",
+            agentAddress: address
+        )
+
+        XCTAssertEqual(suggestions.map(\.name), ["review"])
+    }
+
+    func testSlashSuggestionsAreIsolatedBetweenAgents() {
+        let coordinator = SkillLoadingCoordinator()
+
+        let secondAddress = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+        coordinator.updateProfile(
+            makeAgentProfile(
+                address: address,
+                skills: [(name: "first", description: "First agent skill")]
+            ),
+            for: address
+        )
+
+        coordinator.updateProfile(
+            makeAgentProfile(
+                address: secondAddress,
+                skills: [(name: "second", description: "Second agent skill")]
+            ),
+            for: secondAddress
+        )
+
+        XCTAssertEqual(
+            coordinator.suggestions(prompt: "/", agentAddress: address).map(\.name),
+            ["first"]
+        )
+
+        XCTAssertEqual(
+            coordinator.suggestions(prompt: "/", agentAddress: secondAddress).map(\.name),
+            ["second"]
+        )
+    }
+
+    func testSlashPickerDoesNotShowForOrdinaryTextOrInvalidQuery() {
+        let coordinator = SkillLoadingCoordinator()
+
+        coordinator.updateProfile(
+            makeAgentProfile(
+                address: address,
+                skills: [(name: "review", description: "Review changes")]
+            ),
+            for: address
+        )
+
+        XCTAssertFalse(
+            coordinator.shouldShowSuggestions(prompt: "hello", agentAddress: address)
+        )
+
+        XCTAssertFalse(
+            coordinator.shouldShowSuggestions(prompt: "/review details", agentAddress: address)
+        )
+
+        XCTAssertTrue(
+            coordinator.suggestions(prompt: "/review details", agentAddress: address).isEmpty
+        )
+    }
+
+    func testSelectingSlashSkillInsertsCommandWithArgumentSpace() {
+        let (viewModel, _, _) = makeEnvironment()
+        setUpAgentAndConversation(viewModel)
+
+        viewModel.selectSlashSkill(
+            AgentSkill(name: "commit", description: "Create a commit")
+        )
 
         XCTAssertEqual(viewModel.prompt, "/commit ")
         XCTAssertFalse(viewModel.shouldShowSlashSkillPicker)
     }
 
-    func testSlashDiscoveryFailureKeepsRawCommandSendable() async {
+    // skill check and skill is a message in chat
+    func testControlCenterSkillGoesOutAsAMessageAndKeepsTheDraft() async {
         let (viewModel, transport, _) = makeEnvironment()
-        setUpAgentAndConversation(viewModel)
-        transport.skillFetchError = HostedAgentClientError.server("metadata unavailable")
-        viewModel.prompt = "/unknown"
-        viewModel.promptDidChange()
-        await waitForSkillFetchAttempt(transport: transport)
+        let agent = setUpAgentAndConversation(viewModel)
+        XCTAssertNil(viewModel.activeAgentSkills)
+        transport.simulateAgentProfile(
+            makeAgentProfile(address: agent.address, skills: [(name: "deploy", description: "Ship it")])
+        )
+        XCTAssertEqual(viewModel.activeAgentSkills, [OIPAgentSkill(name: "deploy", description: "Ship it")])
 
-        XCTAssertFalse(viewModel.shouldShowSlashSkillPicker)
+        viewModel.prompt = "half a thought"
+        viewModel.runControlCenterSkill("/deploy to staging")
+        await waitForSentPrompt("/deploy to staging", transport: transport)
+
+        XCTAssertEqual(viewModel.prompt, "half a thought")
         XCTAssertNil(viewModel.errorMessage)
-
-        viewModel.sendPrompt()
-        await waitForSentPrompt(transport: transport)
-        XCTAssertEqual(transport.sentPrompts, ["/unknown"])
-    }
-
-    func testSlashSuggestionsFollowActiveAgentWithoutStaleResults() async {
-        let (viewModel, transport, _) = makeEnvironment()
-        let first = setUpAgentAndConversation(viewModel)
-        let secondAddress = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-        let second = viewModel.saveAgent(name: "Second", address: secondAddress)!
-        _ = viewModel.createConversation(for: second)
-        transport.skillsByAddress = [
-            first.address: [AgentSkill(name: "first")],
-            second.address: [AgentSkill(name: "second")],
-        ]
-
-        viewModel.prompt = "/"
-        viewModel.promptDidChange()
-        await waitForSkillFetch(on: viewModel, transport: transport)
-        XCTAssertEqual(viewModel.slashSkillSuggestions.map(\.name), ["second"])
-
-        viewModel.selectAgent(first)
-        XCTAssertTrue(viewModel.prompt.isEmpty)
-        viewModel.prompt = "/"
-        viewModel.promptDidChange()
-        await waitForSkillFetch(on: viewModel, transport: transport, address: first.address)
-        XCTAssertEqual(viewModel.slashSkillSuggestions.map(\.name), ["first"])
     }
 
     private func makeDefaults() -> UserDefaults {

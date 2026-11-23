@@ -1,4 +1,5 @@
 import Foundation
+import ConnectOnionKit
 
 enum ConversationConnectionState: String, Codable {
     case disconnected
@@ -26,14 +27,12 @@ enum ChatMode: String, CaseIterable, Codable, Identifiable, Equatable {
 
     var label: String {
         switch self {
-        case .safe:
-            return "Safe"
         case .plan:
-            return "Plan"
-        case .accept:
-            return "Accept Edits"
+            return "Read only"
+        case .safe, .accept:
+            return "Auto"
         case .ulw:
-            return "Ultra Work"
+            return "Full access"
         }
     }
 }
@@ -41,6 +40,9 @@ enum ChatMode: String, CaseIterable, Codable, Identifiable, Equatable {
 enum MessageDeliveryState: String, Codable, Equatable {
     case sent
     case queued
+    /// The INPUT may have reached the host but no reply was recorded. The app never sends
+    /// it again on its own; it reconnects and asks the host what happened to it.
+    case transmitted
     case failed
     case cancelled
 }
@@ -49,6 +51,22 @@ enum ToolCallState: String, Codable, Equatable {
     case running
     case completed
     case failed
+    /// Still running when the run ended: Stop, a lost connection, or a stopped batch.
+    case interrupted
+    /// You chose Skip on its approval, so it never ran.
+    case skipped
+
+    /// What the row shows, in the words both apps share. Awaiting approval isn't stored:
+    /// it's a running tool whose approval card is open (ChatViewModel.toolRowState).
+    var rowState: ToolRowState {
+        switch self {
+        case .running: return .running
+        case .completed: return .completed
+        case .failed: return .failed
+        case .interrupted: return .interrupted
+        case .skipped: return .skipped
+        }
+    }
 }
 
 struct ChatImageAttachment: Identifiable, Codable, Equatable {
@@ -147,10 +165,26 @@ struct Conversation: Identifiable, Equatable {
     var updatedAt: Date
     var messages: [ChatMessage]
     var serverSession: [String: JSONValue]?
+    /// The Address this conversation was made under, stamped when a Device Link replaced it.
+    /// nil means the current Address. See `PreviousIdentity` in the Kit.
+    var identityAddress: String?
+    /// Set when the chat is a Tombstone: deleted on this device, kept as an empty row so History
+    /// Restore skips its session. Holds the session's `updated` recorded at deletion; nil = live.
+    var tombstoneUpdated: Date?
 
-    /// Placeholder title; `MessageDeliveryCoordinator` compares against it to decide whether
-    /// the first prompt should name the conversation.
-    static let defaultTitle = "New mobile session"
+    /// Deleted on this device: the row stays so History Restore can skip its session.
+    var isTombstone: Bool { tombstoneUpdated != nil }
+    /// The host's `updated` for this session, as History Restore last saw it; nil = never came from the host.
+    var hostUpdated: Date?
+
+    /// Placeholder title until the first real message names the chat (story 182, kit ChatTitle).
+    static let defaultTitle = "New chat"
+    /// Saved by earlier builds; such a chat is still waiting for a name.
+    static let legacyDefaultTitles: Set<String> = ["New mobile session"]
+
+    var isUntitled: Bool {
+        title == Self.defaultTitle || Self.legacyDefaultTitles.contains(title)
+    }
 
     init(agentID: String? = nil, agentAddress: String = "") {
         let now = Date()
@@ -173,7 +207,10 @@ struct Conversation: Identifiable, Equatable {
         createdAt: Date,
         updatedAt: Date,
         messages: [ChatMessage],
-        serverSession: [String: JSONValue]?
+        serverSession: [String: JSONValue]?,
+        identityAddress: String? = nil,
+        tombstoneUpdated: Date? = nil,
+        hostUpdated: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -184,6 +221,9 @@ struct Conversation: Identifiable, Equatable {
         self.updatedAt = updatedAt
         self.messages = messages
         self.serverSession = serverSession
+        self.identityAddress = identityAddress
+        self.tombstoneUpdated = tombstoneUpdated
+        self.hostUpdated = hostUpdated
     }
 
 }

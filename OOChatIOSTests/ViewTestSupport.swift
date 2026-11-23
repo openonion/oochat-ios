@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import ConnectOnionKit
 import XCTest
 @testable import OOChatIOS
 
@@ -106,6 +107,9 @@ enum ViewHost {
                 return match
             }
             pump(0.05)
+            // A List that was rebuilt (another agent's pane) only makes its rows in a layout pass,
+            // and a test window gets none after the first unless asked.
+            window.layoutIfNeeded()
         } while Date() < deadline
 
         return element(
@@ -367,7 +371,8 @@ enum ViewFixtures {
     static func chatViewModel(
         transport: MockAgentTransport = MockAgentTransport(),
         messages: [ChatMessage] = [],
-        voiceInputController: VoiceInputController? = nil
+        voiceInputController: VoiceInputController? = nil,
+        identityStore: IdentityStore = IdentityStore()
     ) -> ChatViewModel {
         let agent = agent()
         let conversation = conversation(agent: agent, messages: messages)
@@ -382,6 +387,7 @@ enum ViewFixtures {
         let monitor = MockNetworkMonitor()
         return ChatViewModel(
             store: repo,
+            identityStore: identityStore,
             client: transport,
             networkMonitor: monitor,
             voiceInputController: voiceInputController
