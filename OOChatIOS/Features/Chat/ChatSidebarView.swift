@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 struct ChatSidebarView: View {
@@ -29,7 +30,7 @@ struct ChatSidebarView: View {
     var body: some View {
         sheets(alerts(baseContent))
     }
-    
+
     private var baseContent: some View {
         ZStack(alignment: .bottom) {
             sidebarList
@@ -42,7 +43,7 @@ struct ChatSidebarView: View {
             footer
         }
         .background {
-            Color(.systemBackground)
+            OOColor.surface
                 .ignoresSafeArea()
         }
         .onAppear {
