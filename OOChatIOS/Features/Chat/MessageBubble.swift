@@ -1,10 +1,11 @@
 import SwiftUI
+import ConnectOnionKit
 import UIKit
 import UniformTypeIdentifiers
 
 struct MessageBubble: View {
     let message: ChatMessage
-    var onRetry: (() -> Void)? = nil
+    var onRetry: (() -> Void)?
     @State private var previewedImage: ChatImageAttachment?
     @State private var downloadDocument: ChatFileDocument?
     @State private var downloadFilename = "Attachment"
@@ -185,12 +186,13 @@ struct MessageBubble: View {
     @ViewBuilder
     private var deliveryStatus: some View {
         switch message.deliveryState {
-        case .sent:
+        // A transmitted message is in flight; the "Waiting for hosted agent…" bubble shows that.
+        case .sent, .transmitted:
             EmptyView()
         case .queued:
             Label("Queued", systemImage: "clock")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OOColor.inkSecondary)
         case .failed:
             HStack(spacing: 8) {
                 Label("Failed", systemImage: "exclamationmark.triangle.fill")
@@ -206,7 +208,7 @@ struct MessageBubble: View {
             HStack(spacing: 8) {
                 Label("Cancelled", systemImage: "stop.circle")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OOColor.inkSecondary)
                 Button("Retry") {
                     onRetry?()
                 }
