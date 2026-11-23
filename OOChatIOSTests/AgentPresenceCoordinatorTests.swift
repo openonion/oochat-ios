@@ -194,6 +194,116 @@ final class AgentPresenceCoordinatorTests: XCTestCase {
         XCTAssertTrue(viewModel.isAgentOnline(editedAgent))
         XCTAssertFalse(viewModel.isAgentOnline(agent))
     }
+
+    /// header gets label from socket state and last status
+    func testHeaderStatusFollowsTheSocketAndTheHost() throws {
+        let environment = try makeEnvironment()
+        let viewModel = environment.viewModel
+        let transport = environment.transport
+        setUpAgentAndConversation(viewModel)
+        let conversationID = try XCTUnwrap(viewModel.activeConversationID)
+
+        XCTAssertEqual(viewModel.activeConnectionStatus().label, "Not connected")
+        XCTAssertTrue(viewModel.activeConnectionStatus().canRetry)
+
+        transport.simulateConnectionState(.reconnecting, conversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeConnectionStatus().label, "Connecting…")
+        XCTAssertTrue(viewModel.isActiveChatConnecting)
+        // Still connecting after 10 seconds: the header offers Retry.
+        XCTAssertEqual(viewModel.activeConnectionStatus(connectingFor: 10).label, "Can't connect")
+        XCTAssertTrue(viewModel.activeConnectionStatus(connectingFor: 10).canRetry)
+
+        transport.simulateConnectionState(.connected, conversationID: conversationID)
+        viewModel.apply(.hostStatus("running"), forConversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeConnectionStatus().label, "Working…")
+        XCTAssertTrue(viewModel.activeConnectionStatus().isLive)
+
+        transport.simulateConnectionState(.reconnecting, conversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeConnectionStatus().label, "Connecting…")
+
+        transport.simulateConnectionState(.connected, conversationID: conversationID)
+        viewModel.apply(.hostStatus("not_found"), forConversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeConnectionStatus().label, "Session ended")
+        XCTAssertFalse(viewModel.activeConnectionStatus().isLive)
+        XCTAssertFalse(viewModel.activeConnectionStatus().canRetry)
+    }
+
+    func testDashboardIsKeptPerConversation() throws {
+        let environment = try makeEnvironment()
+        let viewModel = environment.viewModel
+        setUpAgentAndConversation(viewModel)
+        let conversationID = try XCTUnwrap(viewModel.activeConversationID)
+
+        XCTAssertNil(viewModel.activeDashboard)
+
+        viewModel.apply(.dashboard(.page(html: "<p>hi</p>")), forConversationID: "another-conversation")
+
+        XCTAssertNil(viewModel.activeDashboard)
+
+        viewModel.apply(.dashboard(.tooLarge(bytes: 20)), forConversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeDashboard, .tooLarge(bytes: 20))
+    }
+
+    // Connect when chat is open for control center
+    func testOpeningAConversationConnectsSoTheControlCenterArrives() async throws {
+        let environment = try makeEnvironment()
+        let viewModel = environment.viewModel
+        let transport = environment.transport
+        environment.monitor.simulate(online: true)
+
+        setUpAgentAndConversation(viewModel)
+        viewModel.connectActiveConversationOnOpen()
+
+        for _ in 0..<200 where viewModel.connectionState != .connected {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(transport.connectedAddresses, [address])
+        XCTAssertEqual(viewModel.connectionState, .connected)
+        XCTAssertNil(viewModel.errorMessage)
+    }
+
+    func testOpeningAConversationThatCannotConnectShowsNoBanner() async throws {
+        let environment = try makeEnvironment()
+        let viewModel = environment.viewModel
+        let transport = environment.transport
+        transport.connectBehavior = .fail(HostedAgentClientError.closed)
+        environment.monitor.simulate(online: true)
+
+        setUpAgentAndConversation(viewModel)
+        viewModel.connectActiveConversationOnOpen()
+
+        for _ in 0..<200 where transport.connectedAddresses.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(transport.connectedAddresses, [address])
+        XCTAssertEqual(viewModel.connectionState, .disconnected)
+        XCTAssertNil(viewModel.errorMessage, "opening a chat is not an action the user took")
+    }
+
+    func testOpeningAConversationDoesNotCountAsActivity() async throws {
+        let environment = try makeEnvironment()
+        let viewModel = environment.viewModel
+        environment.monitor.simulate(online: true)
+
+        setUpAgentAndConversation(viewModel)
+        let before = try XCTUnwrap(viewModel.activeConversation).updatedAt
+        viewModel.connectActiveConversationOnOpen()
+
+        for _ in 0..<200 where viewModel.connectionState != .connected {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let after = try XCTUnwrap(viewModel.activeConversation)
+        XCTAssertEqual(viewModel.connectionState, .connected)
+        XCTAssertNotNil(after.serverSession)
+        XCTAssertEqual(after.updatedAt, before, "opening a chat must not move it to the top")
+    }
+
     private func makeEnvironment() throws -> TestEnvironment {
         let suiteName = "OOChatIOSTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

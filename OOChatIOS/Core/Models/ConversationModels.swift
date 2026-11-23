@@ -1,4 +1,5 @@
 import Foundation
+import ConnectOnionKit
 
 enum ConversationConnectionState: String, Codable {
     case disconnected
@@ -26,14 +27,12 @@ enum ChatMode: String, CaseIterable, Codable, Identifiable, Equatable {
 
     var label: String {
         switch self {
-        case .safe:
-            return "Safe"
         case .plan:
-            return "Plan"
-        case .accept:
-            return "Accept Edits"
+            return "Read only"
+        case .safe, .accept:
+            return "Auto"
         case .ulw:
-            return "Ultra Work"
+            return "Full access"
         }
     }
 }
@@ -41,6 +40,9 @@ enum ChatMode: String, CaseIterable, Codable, Identifiable, Equatable {
 enum MessageDeliveryState: String, Codable, Equatable {
     case sent
     case queued
+    /// The INPUT may have reached the host but no reply was recorded. The app never sends
+    /// it again on its own; it reconnects and asks the host what happened to it.
+    case transmitted
     case failed
     case cancelled
 }
@@ -49,6 +51,22 @@ enum ToolCallState: String, Codable, Equatable {
     case running
     case completed
     case failed
+    /// Still running when the run ended: Stop, a lost connection, or a stopped batch.
+    case interrupted
+    /// You chose Skip on its approval, so it never ran.
+    case skipped
+
+    /// What the row shows, in the words both apps share. Awaiting approval isn't stored:
+    /// it's a running tool whose approval card is open (ChatViewModel.toolRowState).
+    var rowState: ToolRowState {
+        switch self {
+        case .running: return .running
+        case .completed: return .completed
+        case .failed: return .failed
+        case .interrupted: return .interrupted
+        case .skipped: return .skipped
+        }
+    }
 }
 
 struct ChatImageAttachment: Identifiable, Codable, Equatable {
