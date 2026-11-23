@@ -31,6 +31,7 @@ extension ChatViewModel {
 
         do {
             let result = try await client.connect(agentAddress: address, conversation: conversation)
+            deliveryCoordinator.noteSessionModes(result.sessionModes, agentAddress: address)
             if let session = result.serverSession {
                 conversation.mode = HostedAgentSessionState.mode(from: session, fallback: conversation.mode)
                 conversation.serverSession = HostedAgentSessionState.applying(
@@ -41,7 +42,6 @@ extension ChatViewModel {
             }
             let savedAgent = upsertAgent(agent)
             ensureDefaultConversation(for: savedAgent, seed: conversation)
-            skillCoordinator.loadSkillsIfNeeded(for: savedAgent, isOffline: isOffline)
             recoveryCoordinator.setConnectionState(.connected, forConversationID: conversation.id)
             isConnecting = false
             return savedAgent
@@ -59,7 +59,9 @@ extension ChatViewModel {
         } else {
             recoveryCoordinator.setConnectionState(.disconnected, forConversationID: conversation.id)
         }
-        errorMessage = message
+        if !presentIncompatibility(error) {
+            errorMessage = message
+        }
         isConnecting = false
     }
 
@@ -72,6 +74,11 @@ extension ChatViewModel {
         recoveryCoordinator.retryConnectivity()
     }
 
+    /// Opens the active chat's socket so the agent's Control Center arrives (connect on open).
+    func connectActiveConversationOnOpen() {
+        recoveryCoordinator.connectOnOpen(conversationID: activeConversationID)
+    }
+
     func reconnect() async {
         errorMessage = nil
         await recoveryCoordinator.reconnectActiveConversation()
@@ -82,9 +89,29 @@ extension ChatViewModel {
         connectivityErrorMessage = nil
     }
 
+    /// -32010 gets its own screen instead of the red banner. Returns false for every other error.
+    @discardableResult
+    func presentIncompatibility(_ error: Error) -> Bool {
+        guard let value = (error as? HostedAgentClientError)?.incompatibility else {
+            return false
+        }
+        // Final: HostedAgentConnection.canResume(after:) refuses this error, so no reconnect follows.
+        incompatibility = value
+        errorMessage = nil
+        connectivityErrorMessage = nil
+        return true
+    }
+
+    func dismissIncompatibility() {
+        incompatibility = nil
+    }
+
     // Show a banner for a failed delivery or reconnect.
     func presentConnectionError(_ error: Error, forConversationID conversationID: String) {
         guard activeConversationID == conversationID else {
+            return
+        }
+        if presentIncompatibility(error) {
             return
         }
         let message = error.localizedDescription
