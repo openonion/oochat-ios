@@ -194,6 +194,55 @@ final class AgentPresenceCoordinatorTests: XCTestCase {
         XCTAssertTrue(viewModel.isAgentOnline(editedAgent))
         XCTAssertFalse(viewModel.isAgentOnline(agent))
     }
+
+    /// header gets label from socket state and last status
+    func testHeaderStatusFollowsTheSocketAndTheHost() throws {
+        let environment = try makeEnvironment()
+        let viewModel = environment.viewModel
+        let transport = environment.transport
+        setUpAgentAndConversation(viewModel)
+        let conversationID = try XCTUnwrap(viewModel.activeConversationID)
+
+        XCTAssertEqual(viewModel.activeSessionStatusText, "Not Connected")
+
+        transport.simulateConnectionState(.reconnecting, conversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeSessionStatusText, "Connecting")
+
+        transport.simulateConnectionState(.connected, conversationID: conversationID)
+        viewModel.apply(.hostStatus("running"), forConversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeSessionStatusText, "Running")
+        XCTAssertTrue(viewModel.isActiveSessionLive)
+
+        transport.simulateConnectionState(.reconnecting, conversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeSessionStatusText, "Reconnecting")
+
+        transport.simulateConnectionState(.connected, conversationID: conversationID)
+        viewModel.apply(.hostStatus("not_found"), forConversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeSessionStatusText, "Ended")
+        XCTAssertFalse(viewModel.isActiveSessionLive)
+    }
+
+    func testDashboardIsKeptPerConversation() throws {
+        let environment = try makeEnvironment()
+        let viewModel = environment.viewModel
+        setUpAgentAndConversation(viewModel)
+        let conversationID = try XCTUnwrap(viewModel.activeConversationID)
+
+        XCTAssertNil(viewModel.activeDashboard)
+
+        viewModel.apply(.dashboard(.page(html: "<p>hi</p>")), forConversationID: "another-conversation")
+
+        XCTAssertNil(viewModel.activeDashboard)
+
+        viewModel.apply(.dashboard(.tooLarge(bytes: 20)), forConversationID: conversationID)
+
+        XCTAssertEqual(viewModel.activeDashboard, .tooLarge(bytes: 20))
+    }
+
     private func makeEnvironment() throws -> TestEnvironment {
         let suiteName = "OOChatIOSTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

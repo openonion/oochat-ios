@@ -39,7 +39,7 @@ final class ChatViewTests: XCTestCase {
                     toolArguments: ["cmd": .string("swift test")],
                     toolState: .completed
                 ),
-                ChatMessage(id: "agent1", role: .agent, content: "Here is the summary."),
+                ChatMessage(id: "agent1", role: .agent, content: "Here is the summary.")
             ]
         )
         let viewModel = makeContainerViewModel(
@@ -69,10 +69,11 @@ final class ChatViewTests: XCTestCase {
         let window = ViewHost.host(ChatView(viewModel: viewModel))
 
         XCTAssertNotNil(ViewHost.element(labelContains: "Send message", in: window))
-        XCTAssertNotNil(ViewHost.element(labelContains: "Chat mode: Safe", in: window))
+        XCTAssertNotNil(ViewHost.element(labelContains: "Chat mode: Auto", in: window))
     }
 
-    func testToolbarPresenceMatchesSidebarWithoutConversationSocket() async {
+    /// toolbar reports Conversation's session, not agent
+    func testToolbarShowsSessionStatusRatherThanAgentPresence() async {
         let fixture = ChatContainerFixture()
         let conversation = fixture.conversation()
         let transport = MockAgentTransport()
@@ -102,7 +103,7 @@ final class ChatViewTests: XCTestCase {
         XCTAssertTrue(viewModel.isActiveAgentOnline)
         XCTAssertEqual(viewModel.connectionState, .disconnected)
         XCTAssertNotNil(
-            ViewHost.element(labelContains: "Agent status: Online", in: window)
+            ViewHost.element(labelContains: "Session status: Not Connected", in: window)
         )
     }
 

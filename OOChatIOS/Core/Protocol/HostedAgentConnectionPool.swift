@@ -1,10 +1,61 @@
+import ConnectOnionKit
 import Foundation
+
+enum HostedAgentSessionUpdate: Equatable {
+    case hostStatus(String)
+    case dashboard(OIPDashboard)
+
+    var kind: String {
+        switch self {
+        case .hostStatus:
+            return "status"
+        case.dashboard:
+            return "dashboard"
+        }
+    }
+}
 
 // sends only the newest queued state update for each conversation
 final class HostedAgentConnectionStateObserver: @unchecked Sendable {
     private let lock = NSLock()
     private var storedHandler: (@MainActor (String, ConversationConnectionState) -> Void)?
     private var sequenceByConversationID: [String: Int] = [:]
+    private var storedUpdateHandler: (@MainActor (String, HostedAgentSessionUpdate) -> Void)?
+
+    var updateHandler: (@MainActor (String, HostedAgentSessionUpdate) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedUpdateHandler
+        }
+        set {
+            lock.lock()
+            storedUpdateHandler = newValue
+            lock.unlock()
+        }
+    }
+
+    // like state changes, only the newest update of each kind is delivered
+    func notify(conversationID: String, update: HostedAgentSessionUpdate) {
+        let key = "\(conversationID)|\(update.kind)"
+        lock.lock()
+        let sequence = (sequenceByConversationID[key] ?? 0) + 1
+        sequenceByConversationID[key] = sequence
+        lock.unlock()
+
+        Task { @MainActor [weak self] in
+            self?.currentUpdateHandler(key: key, sequence: sequence)?(conversationID, update)
+        }
+    }
+
+    private func currentUpdateHandler(
+        key: String,
+        sequence: Int
+    ) -> (@MainActor (String, HostedAgentSessionUpdate) -> Void)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sequenceByConversationID[key] == sequence ? storedUpdateHandler : nil
+    }
 
     var handler: (@MainActor (String, ConversationConnectionState) -> Void)? {
         get {
@@ -133,6 +184,28 @@ actor HostedAgentConnectionPool {
         }
     }
 
+    func requestModeChange(
+        agentAddress: String,
+        conversation: Conversation,
+        mode: OIPPermissionMode,
+        onEvent: @escaping @MainActor (HostedAgentEvent) -> Void
+    ) async throws {
+        let lease = await acquire(agentAddress: agentAddress, conversationID: conversation.id)
+        do {
+            try await lease.connection.requestModeChange(
+                conversation: conversation,
+                mode: mode,
+                onEvent: onEvent
+            )
+            release(lease)
+            await trimToSize()
+        } catch {
+            release(lease)
+            await trimToSize()
+            throw error
+        }
+    }
+
     func sendPrompt(
         agentAddress: String,
         conversation: Conversation,
@@ -140,7 +213,8 @@ actor HostedAgentConnectionPool {
         images: [String] = [],
         files: [HostedAgentFilePayload] = [],
         onEvent: (@MainActor (HostedAgentEvent) -> Void)?,
-        onInteraction: (@MainActor (HostedAgentInteraction) async -> HostedAgentInteractionDecision)?
+        onInteraction: (@MainActor (HostedAgentInteraction) async -> HostedAgentInteractionDecision)?,
+        onInputDispatched: (@MainActor () -> Void)? = nil
     ) async throws -> HostedAgentResult {
         let lease = await acquire(agentAddress: agentAddress, conversationID: conversation.id)
         do {
@@ -149,6 +223,32 @@ actor HostedAgentConnectionPool {
                 prompt: prompt,
                 images: images,
                 files: files,
+                onEvent: onEvent,
+                onInteraction: onInteraction,
+                onInputDispatched: onInputDispatched
+            )
+            release(lease)
+            await trimToSize()
+            return result
+        } catch {
+            release(lease)
+            await trimToSize()
+            throw error
+        }
+    }
+
+    func resumePrompt(
+        agentAddress: String,
+        conversation: Conversation,
+        prompt: String,
+        onEvent: (@MainActor (HostedAgentEvent) -> Void)?,
+        onInteraction: (@MainActor (HostedAgentInteraction) async -> HostedAgentInteractionDecision)?
+    ) async throws -> HostedAgentResult {
+        let lease = await acquire(agentAddress: agentAddress, conversationID: conversation.id)
+        do {
+            let result = try await lease.connection.resumePrompt(
+                conversation: conversation,
+                prompt: prompt,
                 onEvent: onEvent,
                 onInteraction: onInteraction
             )
